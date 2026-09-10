@@ -1,0 +1,22 @@
+[
+  {
+    "ifindex": 2,
+    "ifname": "port2",
+    "master": "port10"
+  },
+  {
+    "ifindex": 10,
+    "ifname": "port10",
+    "linkinfo": {
+      "info_kind": "bond"
+    }
+  },
+  {
+    "ifindex": 20,
+    "ifname": "port20",
+    "linkinfo": {
+      "info_kind": "vlan"
+    },
+    "link": "port10"
+  }
+]
