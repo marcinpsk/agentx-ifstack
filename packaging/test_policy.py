@@ -280,16 +280,32 @@ class PackagingPolicyTests(unittest.TestCase):
             and node.func.attr == "replace"
         ]
         self.assertEqual(len(replace), 1, "expected exactly one os.replace")
-        fsync_lines = [
+        opened = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "open"
+            and node.value.args
+            and isinstance(node.value.args[0], ast.Attribute)
+            and node.value.args[0].attr == "parent"
+        ]
+        self.assertEqual(len(opened), 1, "expected one os.open of the parent directory")
+        descriptor = opened[0].targets[0].id
+        synced = [
             node.lineno
             for node in ast.walk(tree)
             if isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "fsync"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == descriptor
         ]
         self.assertTrue(
-            any(line > replace[0].lineno for line in fsync_lines),
-            "fsync the parent directory after os.replace, or a crash can revert it",
+            any(line > replace[0].lineno for line in synced),
+            f"fsync {descriptor} after os.replace, or a crash can revert the rename",
         )
 
 

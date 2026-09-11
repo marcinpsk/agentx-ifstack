@@ -824,6 +824,9 @@ fn an_ip_descendant_outside_the_group_still_does_not_wedge_the_session() {
 fn escaped_ip_descendants_do_not_leak_threads_or_fds() {
     let master = Master::start();
     let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
     let mut get = pdu::Get::new(ranges(".10.2"));
     get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
     let baseline = master.resource_counts();
@@ -864,6 +867,9 @@ fn escaped_ip_descendants_do_not_leak_threads_or_fds() {
 fn an_ip_that_closes_both_pipes_without_exiting_does_not_wedge_the_session() {
     let master = Master::start();
     let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
     let mut get = pdu::Get::new(ranges(".10.2"));
     get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
     write_ip(&master.directory, IP_CLOSES_PIPES);
@@ -917,6 +923,9 @@ fn ip_output_limits_apply_to_each_stream() {
         for oversized in [false, true] {
             let master = Master::start();
             let mut stream = master.connect(NETWORK_ORDER, 100);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(90)))
+                .unwrap();
             let fixture = include_str!("fixtures/bond.json");
             let limit = 16 * 1024 * 1024;
             let size = limit + usize::from(oversized);
