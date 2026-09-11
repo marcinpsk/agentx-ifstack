@@ -15,6 +15,15 @@ import time
 import tomllib
 
 
+def sync_parent(path):
+    """Flush the directory entry: a file fsync does not make the rename durable."""
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
 def write_if_changed(path, content):
     """Replace path atomically, and not at all when it already matches.
 
@@ -22,6 +31,8 @@ def write_if_changed(path, content):
     later retry fails on a file it destroyed itself.
     """
     if path.exists() and path.read_text() == content:
+        # A previous run may have replaced the file and then failed to sync the parent.
+        sync_parent(path)
         return
     handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
     try:
@@ -30,12 +41,7 @@ def write_if_changed(path, content):
             new.flush()
             os.fsync(new.fileno())
         os.replace(temporary, path)
-        # A file fsync does not flush the new directory entry, so sync the parent too.
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        sync_parent(path)
     except BaseException:
         pathlib.Path(temporary).unlink(missing_ok=True)
         raise

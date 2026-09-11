@@ -206,7 +206,7 @@ registered connection has no read timeout.
 | `linkinfo.info_kind` | interface kind, used to distinguish stack layers from peers |
 | `link` | lower interface **name** for `vlan`, `macvlan`, `ipvlan`, and `macvtap` |
 | `link_index` | lower interface index when emitted in numeric form |
-| `linkinfo.info_data.link` | lower interface for `vxlan`, as a name or an index |
+| `linkinfo.info_data.link` | lower interface **name** for `vxlan` |
 
 Verified against real Proxmox hosts: `master` and `link` are
 **names, not indices**, and `link_index` is absent entirely. Build an
@@ -215,8 +215,9 @@ depend on `link_index` being present.
 
 The parser resolves lower interfaces for `vlan`, `macvlan`, `ipvlan`, and
 `macvtap` through either `link` or `link_index`. A vxlan carries its underlay in
-`linkinfo.info_data` instead, as a name or an index, and a vxlan with no underlay
-is a standalone interface. It rejects
+`linkinfo.info_data` instead, always as a name. `ip` writes the literal `if<index>`
+there when no interface resolves, so an underlay that matches no interface in the same
+output leaves the vxlan standalone, as does a vxlan with no underlay. It rejects
 missing lower interfaces, conflicting references, duplicate names or indices,
 and self-links. It does not treat veth peer links or VRF membership as stack
 relationships. A lower interface in another namespace is an error because

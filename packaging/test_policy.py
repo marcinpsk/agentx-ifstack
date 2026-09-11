@@ -266,23 +266,23 @@ class PackagingPolicyTests(unittest.TestCase):
         """A file fsync leaves the new directory entry unflushed, so a crash can undo it.
 
         Ordering is the property that matters, so read the syntax tree rather than the
-        text: the directory fsync has to follow os.replace, not merely appear somewhere.
+        text. The no-op path must sync too, or a retry after a failed sync never repairs it.
         """
         script = (ROOT / "packaging/sync-version.sh").read_text()
         embedded = re.search(r"python3 - <<'PY'\n(.*?)\nPY\n", script, re.DOTALL)
         self.assertIsNotNone(embedded, "the sync script must embed a python3 heredoc")
         tree = ast.parse(embedded.group(1))
-        replace = [
-            node
+        functions = {
+            node.name: node
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "replace"
-        ]
-        self.assertEqual(len(replace), 1, "expected exactly one os.replace")
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.assertIn("sync_parent", functions, "expected a sync_parent helper")
+
+        # The helper must fsync a descriptor opened on the parent directory.
         opened = [
             node
-            for node in ast.walk(tree)
+            for node in ast.walk(functions["sync_parent"])
             if isinstance(node, ast.Assign)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Attribute)
@@ -291,23 +291,49 @@ class PackagingPolicyTests(unittest.TestCase):
             and isinstance(node.value.args[0], ast.Attribute)
             and node.value.args[0].attr == "parent"
         ]
-        self.assertEqual(len(opened), 1, "expected one os.open of the parent directory")
+        self.assertEqual(len(opened), 1, "sync_parent must open the parent directory")
         descriptor = opened[0].targets[0].id
-        synced = [
-            node.lineno
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "fsync"
-            and node.args
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == descriptor
-        ]
         self.assertTrue(
-            any(line > replace[0].lineno for line in synced),
-            f"fsync {descriptor} after os.replace, or a crash can revert the rename",
+            any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "fsync"
+                and node.args
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == descriptor
+                for node in ast.walk(functions["sync_parent"])
+            ),
+            f"sync_parent must fsync {descriptor}",
         )
 
+        writer = functions["write_if_changed"]
+        calls = [
+            node.lineno
+            for node in ast.walk(writer)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "sync_parent"
+        ]
+        replace = [
+            node.lineno
+            for node in ast.walk(writer)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "replace"
+        ]
+        self.assertEqual(len(replace), 1, "expected exactly one os.replace")
+        self.assertTrue(
+            any(line > replace[0] for line in calls),
+            "call sync_parent after os.replace, or a crash can revert the rename",
+        )
+        returns = [
+            node.lineno for node in ast.walk(writer) if isinstance(node, ast.Return)
+        ]
+        self.assertTrue(returns, "expected the unchanged-content early return")
+        self.assertTrue(
+            any(line < min(returns) for line in calls),
+            "call sync_parent before the early return, so a retry repairs a failed sync",
+        )
 
 if __name__ == "__main__":
     unittest.main()

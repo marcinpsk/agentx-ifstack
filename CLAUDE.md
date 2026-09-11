@@ -86,11 +86,14 @@ JSON over `/sys/class/net` traversal.
 | `linkinfo.info_kind` | interface kind, distinguishes stack layers from peers |
 | `link` | lower interface name for `vlan`, `macvlan`, `ipvlan`, and `macvtap` |
 | `link_index` | lower interface index when emitted in numeric form |
-| `linkinfo.info_data.link` | lower interface for `vxlan`, as a name or an index |
+| `linkinfo.info_data.link` | lower interface name for `vxlan` |
 
 A vxlan does not use `link` or `link_index`. Its underlay is `IFLA_VXLAN_LINK`,
-which `ip` prints inside `linkinfo.info_data`. A vxlan with no underlay is a
-standalone interface, not an error.
+which `ip` prints inside `linkinfo.info_data`. It always prints a name, through
+`ll_index_to_name`, which falls back to the literal `if<index>` when no interface
+resolves. An underlay that names no interface in the same output is therefore not a
+local relationship, so the vxlan is standalone. A vxlan with no underlay at all is
+standalone too. Neither case is an error: one odd interface must not fail the table.
 
 Reject lower-interface references with `link_netnsid`: remote ifIndexes are
 not local interface identifiers. Exclude veth peer links from stack rows.

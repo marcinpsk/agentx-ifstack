@@ -251,9 +251,17 @@ impl Master {
 
 impl Drop for Master {
     fn drop(&mut self) {
-        self.child.kill().expect("stop test subagent");
-        self.child.wait().expect("reap test subagent");
-        fs::remove_dir_all(&self.directory).expect("remove test files");
+        // Drop runs while a failing assertion unwinds, so a panic here would abort the
+        // process and hide that assertion.
+        for (label, result) in [
+            ("stop test subagent", self.child.kill()),
+            ("reap test subagent", self.child.wait().map(|_| ())),
+            ("remove test files", fs::remove_dir_all(&self.directory)),
+        ] {
+            if let Err(error) = result {
+                eprintln!("{label}: {error}");
+            }
+        }
     }
 }
 

@@ -65,10 +65,11 @@ pub fn parse(input: &str) -> Result<Vec<(u32, u32)>> {
         }
         if link.kind() == Some("vxlan") {
             // A vxlan reports its underlay in linkinfo.info_data, never in link or link_index.
-            if let Some(lower) = vxlan_lower(link, &names)? {
-                if !indices.contains(&lower) {
-                    return Err(invalid("unknown lower interface index"));
-                }
+            // iproute2 prints an index it cannot resolve as "if<index>", so an underlay that
+            // names no local interface leaves the vxlan standalone instead of failing the table.
+            if let Some(lower) = vxlan_lower(link, &names)
+                && indices.contains(&lower)
+            {
                 rows.insert((link.ifindex, lower));
             }
         } else if matches!(link.kind(), Some("vlan" | "macvlan" | "ipvlan" | "macvtap")) {
@@ -114,22 +115,16 @@ pub fn parse(input: &str) -> Result<Vec<(u32, u32)>> {
     Ok(rows.into_iter().collect())
 }
 
-fn vxlan_lower(link: &Link, names: &BTreeMap<&str, &Link>) -> Result<Option<u32>> {
-    let Some(underlay) = link
+fn vxlan_lower(link: &Link, names: &BTreeMap<&str, &Link>) -> Option<u32> {
+    match link
         .linkinfo
         .as_ref()
         .and_then(|info| info.info_data.as_ref())
-        .and_then(|data| data.link.as_ref())
-    else {
-        return Ok(None);
-    };
-    Ok(Some(match underlay {
-        Underlay::Name(name) => names
-            .get(name.as_str())
-            .map(|lower| lower.ifindex)
-            .ok_or_else(|| invalid("unknown lower interface name"))?,
-        Underlay::Index(index) => *index,
-    }))
+        .and_then(|data| data.link.as_ref())?
+    {
+        Underlay::Name(name) => names.get(name.as_str()).map(|lower| lower.ifindex),
+        Underlay::Index(index) => Some(*index),
+    }
 }
 
 fn invalid(message: &str) -> Error {
@@ -431,16 +426,22 @@ mod tests {
         assert_eq!(rows, [(0, 10), (10, 0)]);
     }
 
+    // iproute2 prints an underlay it cannot resolve as "if<index>", so an unresolvable
+    // reference must drop the row rather than fail the whole table.
     #[test]
-    fn a_vxlan_rejects_an_unknown_underlay() {
-        for underlay in [r#""link":"missing""#, r#""link":99"#] {
+    fn a_vxlan_with_an_unresolvable_underlay_is_standalone() {
+        for underlay in [r#""link":"if99""#, r#""link":"missing""#, r#""link":99"#] {
             let input = format!(
                 r#"[
                 {{"ifindex":2,"ifname":"port2"}},
                 {{"ifindex":10,"ifname":"vx10","linkinfo":{{"info_kind":"vxlan","info_data":{{{underlay}}}}}}}
             ]"#
             );
-            assert!(parse(&input).is_err(), "accepted {underlay}");
+            assert_eq!(
+                parse(&input).unwrap(),
+                [(0, 2), (0, 10), (2, 0), (10, 0)],
+                "underlay {underlay}"
+            );
         }
     }
 }

@@ -90,6 +90,10 @@ pub fn load(
         Err(error) if error.kind() == ErrorKind::NotFound && path.is_none() => Config::default(),
         Err(error) => return Err(format!("config {}: {error}", selected_path.display())),
     };
+    // Apply the documented override first, so validation sees the effective socket.
+    if let Some(socket) = socket {
+        config.socket = socket;
+    }
     if config.socket.as_os_str().is_empty() {
         return Err("socket must not be empty".into());
     }
@@ -98,9 +102,6 @@ pub fn load(
     }
     if config.priority == 0 {
         return Err("priority must be between 1 and 255".into());
-    }
-    if let Some(socket) = socket {
-        config.socket = socket;
     }
     Ok(Action::Run(config))
 }
