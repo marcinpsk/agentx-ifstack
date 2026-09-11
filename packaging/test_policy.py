@@ -330,7 +330,7 @@ class PackagingPolicyTests(unittest.TestCase):
         pull_request builds the merge commit, which is the result that matters for a
         pull request, so push stays on main for post-merge validation.
         """
-        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        for path in sorted(workflow_paths()):
             workflow = yaml.safe_load(path.read_text())
             # PyYAML follows YAML 1.1, where a bare `on:` key parses as the boolean True.
             triggers = workflow.get("on", workflow.get(True))
