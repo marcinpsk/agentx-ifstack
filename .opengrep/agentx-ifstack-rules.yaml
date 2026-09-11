@@ -25,8 +25,14 @@ rules:
         - "tests/**"
     patterns:
       - pattern: $CHILD.try_wait()
-      - pattern-not-inside: |
-          fn finish(&mut self) -> Result<ExitStatus> { ... }
+      # Scope the exemption to IpCommand::finish. Matching the signature alone would
+      # exempt any same-shaped method added elsewhere.
+      - pattern-not:
+          patterns:
+            - pattern-inside: |
+                impl IpCommand { ... }
+            - pattern-inside: |
+                fn finish(&mut self) -> Result<ExitStatus> { ... }
 
   - id: agentx-unwrap-outside-tests
     languages: [rust]
@@ -45,4 +51,7 @@ rules:
         - "tests/**"
     patterns:
       - pattern: $VALUE.unwrap()
-      - pattern-not-inside: mod tests { ... }
+      # Require the attribute: a plain `mod tests` is not a test module.
+      - pattern-not-inside: |
+          #[cfg(test)]
+          mod tests { ... }

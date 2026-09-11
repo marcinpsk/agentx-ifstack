@@ -142,8 +142,13 @@ class PackagingPolicyTests(unittest.TestCase):
             "run semantic-release publish, or the packages never reach the release",
         )
         # publish defaults to the latest release, which would attach this run's packages
-        # to the previous tag when nothing was bumped.
-        self.assertIn("--tag", commands, "publish must name the tag it uploads to")
+        # to the previous tag when nothing was bumped. Pin the whole command: a stale
+        # literal or an unrelated variable would satisfy a bare "--tag" check.
+        self.assertIn(
+            'semantic-release publish --tag "$after"',
+            commands,
+            "publish must upload to the tag this run created",
+        )
 
     def test_the_build_command_refuses_an_incomplete_package_set(self):
         """build_command runs before the tag, so a missing format must stop the release.
@@ -152,7 +157,7 @@ class PackagingPolicyTests(unittest.TestCase):
         tagged, pushed and created the release by then. Run the real script against a
         stubbed build so the guard itself is exercised.
         """
-        def run(produce):
+        def run(files, directories=()):
             with tempfile.TemporaryDirectory() as directory:
                 work = Path(directory)
                 (work / "packaging").mkdir()
@@ -162,7 +167,8 @@ class PackagingPolicyTests(unittest.TestCase):
                 (work / "packaging/sync-version.sh").write_text("#!/bin/sh\n")
                 (work / "packaging/build.sh").write_text(
                     "#!/bin/sh\nset -eu\nmkdir -p dist\n"
-                    + "".join(f"touch dist/pkg{suffix}\n" for suffix in produce)
+                    + "".join(f"touch dist/pkg{suffix}\n" for suffix in files)
+                    + "".join(f"mkdir -p dist/pkg{suffix}\n" for suffix in directories)
                 )
                 return subprocess.run(
                     ["sh", "packaging/release-build.sh"], cwd=work,
@@ -170,11 +176,19 @@ class PackagingPolicyTests(unittest.TestCase):
                 )
 
         self.assertEqual(run([".deb", ".rpm"]).returncode, 0, "a complete set must build")
-        for produce, missing in (([".deb"], ".rpm"), ([".rpm"], ".deb"), ([], "both")):
-            result = run(produce)
+        for files, missing in (([".deb"], ".rpm"), ([".rpm"], ".deb"), ([], "both")):
             self.assertNotEqual(
-                result.returncode, 0,
+                run(files).returncode, 0,
                 f"the build command accepted a package set missing {missing}",
+            )
+        # A directory carrying the suffix is not a package.
+        for files, directories, shape in (
+            ([".rpm"], [".deb"], "a directory named *.deb"),
+            ([".deb"], [".rpm"], "a directory named *.rpm"),
+        ):
+            self.assertNotEqual(
+                run(files, directories).returncode, 0,
+                f"the build command accepted {shape}",
             )
 
     def test_the_sync_script_carries_a_bump_into_every_version_source(self):

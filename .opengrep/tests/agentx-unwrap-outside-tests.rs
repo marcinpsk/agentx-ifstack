@@ -20,3 +20,13 @@ mod tests {
         assert_eq!(production_ok("7").unwrap(), 7);
     }
 }
+
+// A module literally named tests, but without #[cfg(test)], is production code.
+mod outer {
+    mod tests {
+        fn helper(input: &str) -> u32 {
+            // ruleid: agentx-unwrap-outside-tests
+            input.parse::<u32>().unwrap()
+        }
+    }
+}

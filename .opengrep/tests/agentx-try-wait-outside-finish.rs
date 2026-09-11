@@ -27,3 +27,15 @@ fn wait_bounded(child: &mut Child) -> Result<ExitStatus> {
         }
     }
 }
+
+// A method with the same signature in another type must not inherit the exemption.
+impl SomethingElse {
+    fn finish(&mut self) -> Result<ExitStatus> {
+        let mut child = self.child.take().expect("unreaped child");
+        // ruleid: agentx-try-wait-outside-finish
+        match child.try_wait() {
+            Ok(Some(status)) => Ok(status),
+            _ => Err(Error::other("not reaped")),
+        }
+    }
+}
