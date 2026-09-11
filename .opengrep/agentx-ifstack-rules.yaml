@@ -51,7 +51,8 @@ rules:
         - "tests/**"
     patterns:
       - pattern: $VALUE.unwrap()
-      # Require the attribute: a plain `mod tests` is not a test module.
+      # The attribute makes a test module, not its name. `$_` matches any module name;
+      # a named metavariable does not match a Rust module declaration here.
       - pattern-not-inside: |
           #[cfg(test)]
-          mod tests { ... }
+          mod $_ { ... }

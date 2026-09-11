@@ -30,3 +30,12 @@ mod outer {
         }
     }
 }
+
+// A test module may carry any name; the attribute is what makes it a test module.
+#[cfg(test)]
+mod unit_tests {
+    fn helper() {
+        // ok: agentx-unwrap-outside-tests
+        let _ = "7".parse::<u32>().unwrap();
+    }
+}

@@ -125,10 +125,14 @@ class PackagingPolicyTests(unittest.TestCase):
         publish = config["tool"]["semantic_release"]["publish"]
         self.assertIs(publish["upload_to_vcs_release"], True)
         globs = publish["dist_glob_patterns"]
+        # build.sh writes into dist/, so a glob elsewhere uploads nothing.
         for suffix in (".deb", ".rpm"):
             self.assertTrue(
-                any(glob.endswith(suffix) for glob in globs),
-                f"no dist glob matches {suffix}: {globs}",
+                any(
+                    glob.startswith("dist/") and glob.endswith(suffix)
+                    for glob in globs
+                ),
+                f"no dist/ glob matches {suffix}: {globs}",
             )
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         steps = workflow["jobs"]["semantic-release"]["steps"]
@@ -348,6 +352,14 @@ class PackagingPolicyTests(unittest.TestCase):
             workflow = yaml.safe_load(path.read_text())
             # PyYAML follows YAML 1.1, where a bare `on:` key parses as the boolean True.
             triggers = workflow.get("on", workflow.get(True))
+            # GitHub Actions also accepts `on: [push, pull_request]`.
+            if isinstance(triggers, list):
+                self.assertFalse(
+                    "push" in triggers and "pull_request" in triggers,
+                    f"{path.name}: push and pull_request both fire on a PR branch, "
+                    "so every job runs twice; limit push to main",
+                )
+                continue
             if not isinstance(triggers, dict) or "pull_request" not in triggers:
                 continue
             push = triggers.get("push")
