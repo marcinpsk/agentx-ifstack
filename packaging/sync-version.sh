@@ -33,9 +33,18 @@ entry = (
     f" -- {maintainer}  {released}\n"
 )
 changelog.write_text(f"{entry}\n{existing}" if existing.strip() else entry)
-PY
 
-# Record the new version in this package's own Cargo.lock entry. --workspace keeps
-# every dependency at the version already pinned, so no upgrade rides along.
-cargo update --workspace --offline
+# Cargo.lock records this package's own version. Rewrite just that line rather than
+# shelling out to cargo, which would need a populated registry cache to run offline.
+# A wrong edit cannot slip through: packaging/build.sh then runs cargo build --locked.
+lock = pathlib.Path("Cargo.lock")
+text = lock.read_text()
+pattern = re.compile(
+    r'(\[\[package\]\]\nname = "agentx-ifstack"\nversion = ")[^"]+(")'
+)
+updated, count = pattern.subn(rf"\g<1>{version}\g<2>", text)
+if count != 1:
+    raise SystemExit(f"Cargo.lock holds {count} agentx-ifstack entries, expected 1")
+lock.write_text(updated)
+PY
 
