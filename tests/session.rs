@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::{
     fs::PermissionsExt,
     net::{UnixListener, UnixStream},
@@ -20,6 +21,13 @@ const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 
 const IP_SERVES_LINKS: &str = "#!/bin/sh\n[ \"$*\" = '-details -json link show' ] || exit 2\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n";
 const IP_NEVER_EXITS: &str = "#!/bin/sh\nexec /bin/sleep 600\n";
+const IP_CLOSES_PIPES: &str = "#!/bin/sh\nexec 1>&- 2>&-\nexec /bin/sleep 600\n";
+const IP_LEAVES_DESCENDANT: &str = concat!(
+    "#!/bin/sh\n",
+    "/bin/sleep 600 >/dev/null 2>&1 &\n",
+    "echo $! > \"$IFSTACK_TEST_PIDFILE\"\n",
+    "exec /bin/cat \"$IFSTACK_TEST_LINKS\"\n",
+);
 // Exits at once, but a descendant keeps the inherited stdout pipe open. The
 // descendant records its pid so a test can prove it was cleaned up.
 const IP_LEAKS_ITS_PIPE: &str = concat!(
@@ -48,6 +56,41 @@ struct Master {
     directory: PathBuf,
     listener: UnixListener,
     child: Child,
+}
+
+struct Descendant(OwnedFd);
+
+impl Descendant {
+    fn track(pid: i32) -> Option<Self> {
+        // SAFETY: pidfd_open takes a process ID and zero flags.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd == -1 {
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.raw_os_error(),
+                Some(libc::ESRCH),
+                "pidfd_open: {error}"
+            );
+            return None;
+        }
+        // SAFETY: pidfd_open returned a new descriptor owned by this guard.
+        Some(Self(unsafe { OwnedFd::from_raw_fd(fd as i32) }))
+    }
+}
+
+impl Drop for Descendant {
+    fn drop(&mut self) {
+        // SAFETY: The owned pidfd identifies this descendant even after its PID is reused.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.0.as_raw_fd(),
+                libc::SIGKILL,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            );
+        }
+    }
 }
 
 impl Master {
@@ -172,6 +215,16 @@ impl Master {
 
     fn flood_ip(&self) {
         write_ip(&self.directory, IP_FLOODS_STDOUT);
+    }
+
+    fn resource_counts(&self) -> (usize, usize) {
+        let count = |name| {
+            fs::read_dir(format!("/proc/{}/{name}", self.child.id()))
+                .unwrap()
+                .inspect(|entry| assert!(entry.is_ok(), "proc entry: {entry:?}"))
+                .count()
+        };
+        (count("task"), count("fd"))
     }
 
     /// Peak resident memory of the daemon, in KiB, from the kernel's own accounting.
@@ -690,7 +743,7 @@ fn a_leaked_ip_descendant_is_killed_rather_than_left_running() {
     assert_eq!(request().res_error, ResError::ProcessingError);
 
     let descendant = master.descendant_pid();
-    // The direct child is already reaped, so only killing its process group reaches this.
+    // Group cleanup must kill descendants before it reaps the direct child.
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(descendant) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
@@ -753,7 +806,9 @@ fn an_ip_descendant_outside_the_group_still_does_not_wedge_the_session() {
     master.escape_ip_group();
     std::thread::sleep(Duration::from_millis(1100));
     let started = Instant::now();
-    assert_eq!(request().res_error, ResError::ProcessingError);
+    let response = request();
+    let _descendant = Descendant::track(master.descendant_pid());
+    assert_eq!(response.res_error, ResError::ProcessingError);
     assert!(
         started.elapsed() < Duration::from_secs(30),
         "an escaped ip descendant blocked the request loop for {:?}",
@@ -763,4 +818,136 @@ fn an_ip_descendant_outside_the_group_still_does_not_wedge_the_session() {
     master.restore_ip();
     std::thread::sleep(Duration::from_millis(1100));
     assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+}
+
+#[test]
+fn escaped_ip_descendants_do_not_leak_threads_or_fds() {
+    let master = Master::start();
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let baseline = master.resource_counts();
+    let mut counts = Vec::new();
+    let mut descendants = Vec::new();
+    master.escape_ip_group();
+    for cycle in 0..8 {
+        assert_eq!(
+            exchange(&mut stream, &get.to_bytes().unwrap()).res_error,
+            ResError::ProcessingError
+        );
+        counts.push(master.resource_counts());
+        descendants.push(Descendant::track(master.descendant_pid()));
+        eprintln!(
+            "refresh {cycle}: threads={} fds={}",
+            counts[cycle].0, counts[cycle].1
+        );
+    }
+    assert!(
+        counts
+            .iter()
+            .all(|&(threads, fds)| threads <= baseline.0 && fds <= baseline.1),
+        "resource leak: baseline={baseline:?}, refresh counts={counts:?}"
+    );
+    master.restore_ip();
+    assert_eq!(
+        exchange(&mut stream, &get.to_bytes().unwrap())
+            .vb
+            .unwrap()
+            .0[0]
+            .data,
+        Value::Integer(1)
+    );
+    assert_eq!(master.resource_counts(), baseline);
+}
+
+#[test]
+fn an_ip_that_closes_both_pipes_without_exiting_does_not_wedge_the_session() {
+    let master = Master::start();
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    write_ip(&master.directory, IP_CLOSES_PIPES);
+    let started = Instant::now();
+    assert_eq!(
+        exchange(&mut stream, &get.to_bytes().unwrap()).res_error,
+        ResError::ProcessingError
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    master.restore_ip();
+    assert_eq!(
+        exchange(&mut stream, &get.to_bytes().unwrap())
+            .vb
+            .unwrap()
+            .0[0]
+            .data,
+        Value::Integer(1)
+    );
+}
+
+#[test]
+fn a_successful_ip_kills_descendants_that_closed_their_pipes() {
+    let master = Master::start();
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    write_ip(&master.directory, IP_LEAVES_DESCENDANT);
+    assert_eq!(
+        exchange(&mut stream, &get.to_bytes().unwrap())
+            .vb
+            .unwrap()
+            .0[0]
+            .data,
+        Value::Integer(1)
+    );
+    let pid = master.descendant_pid();
+    let _descendant = Descendant::track(pid);
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while process_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_alive(pid),
+        "ip left descendant {pid} running after success"
+    );
+}
+
+#[test]
+fn ip_output_limits_apply_to_each_stream() {
+    for stderr in [false, true] {
+        for oversized in [false, true] {
+            let master = Master::start();
+            let mut stream = master.connect(NETWORK_ORDER, 100);
+            let fixture = include_str!("fixtures/bond.json");
+            let limit = 16 * 1024 * 1024;
+            let size = limit + usize::from(oversized);
+            if stderr {
+                fs::write(master.directory.join("links.json.stderr"), vec![b' '; size]).unwrap();
+                write_ip(
+                    &master.directory,
+                    concat!(
+                        "#!/bin/sh\n",
+                        "/bin/cat \"${IFSTACK_TEST_LINKS}.stderr\" >&2\n",
+                        "exec /bin/cat \"$IFSTACK_TEST_LINKS\"\n",
+                    ),
+                );
+            } else {
+                master.topology(&format!("{}{fixture}", " ".repeat(size - fixture.len())));
+            }
+            let mut get = pdu::Get::new(ranges(".10.2"));
+            get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+            let response = exchange(&mut stream, &get.to_bytes().unwrap());
+            assert_eq!(
+                response.res_error,
+                if oversized {
+                    ResError::ProcessingError
+                } else {
+                    ResError::NoAgentXError
+                },
+                "stderr={stderr}, size={size}"
+            );
+            if !oversized {
+                assert_eq!(response.vb.unwrap().0[0].data, Value::Integer(1));
+            }
+        }
+    }
 }

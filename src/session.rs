@@ -1,9 +1,8 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread::JoinHandle;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use agentx::ByteOrder;
@@ -21,11 +20,8 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 // Must stay below the session timeout above so a slow ip still leaves time to answer.
 const IP_TIMEOUT: Duration = Duration::from_secs(3);
 const IP_POLL: Duration = Duration::from_millis(20);
-// A runaway ip can write gigabytes well inside IP_TIMEOUT, so the capture is bounded
-// too. 16 MiB is far above any real `ip link show`, which is ~1.4 KiB per interface.
-const MAX_IP_OUTPUT: u64 = 16 * 1024 * 1024;
-// How long to wait for a reader to notice the group kill before abandoning it.
-const IP_REAP_GRACE: Duration = Duration::from_millis(500);
+const MAX_IP_OUTPUT: usize = 16 * 1024 * 1024;
+const IP_REAP_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_PAYLOAD: u32 = 1024 * 1024;
 const MAX_OID_SUBIDS: usize = 128;
 const NOT_WRITABLE: u16 = 17;
@@ -251,130 +247,196 @@ fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
-/// Runs `ip link show` under a deadline. An `ip` that never exits, whose output a
-/// descendant keeps open, or that never stops writing must not wedge or exhaust the
-/// single-threaded request loop.
 fn read_links() -> Result<Vec<u8>> {
-    let mut child = Command::new("ip")
-        .args(["-details", "-json", "link", "show"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Its own group, so a descendant that outlives ip can still be signalled.
-        .process_group(0)
-        .spawn()?;
-    let group = child.id() as i32;
-    let deadline = Instant::now() + IP_TIMEOUT;
-    // Drain both pipes concurrently; a full pipe would otherwise block the child forever.
-    let (stdout_reader, stdout) = drain(child.stdout.take().expect("piped stdout"));
-    let (stderr_reader, stderr) = drain(child.stderr.take().expect("piped stderr"));
+    IpCommand::spawn()?.into_output()
+}
 
-    let status = match wait_bounded(&mut child, deadline) {
-        Ok(status) => status,
-        Err(error) => {
-            // ip is still running, so its pid is unreaped and the group is certainly ours.
-            kill_group(group);
-            let _ = child.wait();
-            release(stdout_reader, &stdout);
-            release(stderr_reader, &stderr);
-            return Err(error);
+struct IpCommand {
+    child: Option<Child>,
+}
+
+impl IpCommand {
+    fn spawn() -> Result<Self> {
+        Ok(Self {
+            child: Some(
+                Command::new("ip")
+                    .args(["-details", "-json", "link", "show"])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .process_group(0)
+                    .spawn()?,
+            ),
+        })
+    }
+
+    fn exited(&self) -> Result<bool> {
+        let child = self.child.as_ref().expect("unreaped ip child");
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: info is writable, and WNOWAIT keeps our child's PID allocated.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == -1 {
+            return Err(Error::last_os_error());
         }
-    };
+        // SAFETY: waitid succeeded; the zeroed record also covers no pending exit.
+        Ok(unsafe { info.assume_init().si_pid() } != 0)
+    }
 
-    match (
-        collect_bounded(&stdout, deadline),
-        collect_bounded(&stderr, deadline),
-    ) {
-        (Ok(stdout), Ok(stderr)) => {
-            // Both pipes reached EOF and ip is reaped, so nothing of ours is left to
-            // signal. Killing here could reach an unrelated group that has since been
-            // given this pid number.
-            if status.success() {
-                Ok(stdout)
-            } else {
-                Err(Error::other(format!(
-                    "ip link exited with {}: {}",
-                    status,
-                    String::from_utf8_lossy(&stderr).trim()
-                )))
+    fn into_output(mut self) -> Result<Vec<u8>> {
+        let deadline = Instant::now() + IP_TIMEOUT;
+        let child = self.child.as_mut().expect("unreaped ip child");
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let mut fds = [stdout.as_raw_fd(), stderr.as_raw_fd()].map(|fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        for fd in &fds {
+            // SAFETY: Each descriptor belongs to a live pipe owned by this call.
+            let flags = unsafe { libc::fcntl(fd.fd, libc::F_GETFL) };
+            if flags == -1 {
+                return Err(Error::last_os_error());
+            }
+            // SAFETY: F_SETFL changes only this pipe's read-side file description.
+            if unsafe { libc::fcntl(fd.fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+                return Err(Error::last_os_error());
             }
         }
-        (stdout_result, stderr_result) => {
-            // A pipe is still held open, so the group still has a member and its pid
-            // number cannot have been recycled.
-            kill_group(group);
-            release(stdout_reader, &stdout);
-            release(stderr_reader, &stderr);
-            Err(stdout_result
-                .err()
-                .or_else(|| stderr_result.err())
-                .expect("a non-Ok pair has at least one error"))
-        }
-    }
-}
-
-/// Reaps a reader thread if the group kill freed it, and abandons it otherwise. A
-/// descendant that left the group with setsid keeps its pipe open forever, so joining
-/// unconditionally would wedge the request loop this function exists to protect.
-fn release(reader: JoinHandle<()>, channel: &Receiver<Result<Vec<u8>>>) {
-    if channel.recv_timeout(IP_REAP_GRACE).is_ok() {
-        let _ = reader.join();
-    }
-}
-
-fn kill_group(group: i32) {
-    // SAFETY: `group` is our own child's process group, created by process_group(0).
-    // A group that has already exited returns ESRCH, which is not an error here.
-    unsafe { libc::kill(-group, libc::SIGKILL) };
-}
-
-type Reader = (JoinHandle<()>, Receiver<Result<Vec<u8>>>);
-
-fn drain(pipe: impl Read + Send + 'static) -> Reader {
-    let (sender, receiver) = mpsc::channel();
-    let handle = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        // Read one byte past the limit so exceeding it is distinguishable from meeting it.
-        let result = pipe
-            .take(MAX_IP_OUTPUT + 1)
-            .read_to_end(&mut bytes)
-            .and_then(|_| {
-                if bytes.len() as u64 > MAX_IP_OUTPUT {
-                    Err(Error::new(
-                        ErrorKind::InvalidData,
-                        format!("ip link wrote more than {MAX_IP_OUTPUT} bytes"),
-                    ))
-                } else {
-                    Ok(bytes)
+        let mut output = [Vec::new(), Vec::new()];
+        let mut pipes: [&mut dyn Read; 2] = [&mut stdout, &mut stderr];
+        loop {
+            ip_time_left(deadline)?;
+            let exited = match self.exited() {
+                Ok(exited) => exited,
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            if exited && fds.iter().all(|fd| fd.fd < 0) {
+                break;
+            }
+            let remaining = ip_time_left(deadline)?;
+            let timeout = if exited {
+                remaining
+            } else {
+                remaining.min(IP_POLL)
+            };
+            let millis = timeout.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
+            // SAFETY: fds is writable and contains exactly the supplied number of entries.
+            let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
+            let error = (result == -1).then(Error::last_os_error);
+            ip_time_left(deadline)?;
+            if let Some(error) = error {
+                if error.kind() == ErrorKind::Interrupted {
+                    continue;
                 }
-            });
-        let _ = sender.send(result);
-    });
-    (handle, receiver)
-}
+                return Err(error);
+            }
+            for ((fd, pipe), bytes) in fds.iter_mut().zip(&mut pipes).zip(&mut output) {
+                if fd.fd < 0 || fd.revents == 0 {
+                    continue;
+                }
+                let mut buffer = [0; 8192];
+                loop {
+                    ip_time_left(deadline)?;
+                    // Read one byte past the cap to distinguish full from oversized output.
+                    let limit = buffer.len().min(MAX_IP_OUTPUT + 1 - bytes.len());
+                    match pipe.read(&mut buffer[..limit]) {
+                        Ok(0) => {
+                            fd.fd = -1;
+                            break;
+                        }
+                        Ok(count) => {
+                            bytes.extend_from_slice(&buffer[..count]);
+                            if bytes.len() > MAX_IP_OUTPUT {
+                                return Err(invalid(&format!(
+                                    "ip link wrote more than {MAX_IP_OUTPUT} bytes"
+                                )));
+                            }
+                        }
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                        Err(error) => {
+                            fd.fd = -1;
+                            return Err(error);
+                        }
+                    }
+                }
+                if fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                    fd.fd = -1;
+                    return Err(Error::other("ip output pipe failed"));
+                }
+            }
+        }
+        let status = self.finish()?;
+        let [stdout, stderr] = output;
+        if status.success() {
+            Ok(stdout)
+        } else {
+            Err(Error::other(format!(
+                "ip link exited with {}: {}",
+                status,
+                String::from_utf8_lossy(&stderr).trim()
+            )))
+        }
+    }
 
-fn collect_bounded(reader: &Receiver<Result<Vec<u8>>>, deadline: Instant) -> Result<Vec<u8>> {
-    match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(result) => result,
-        Err(RecvTimeoutError::Timeout) => Err(Error::new(
-            ErrorKind::TimedOut,
-            "ip link output was still open after the deadline",
-        )),
-        Err(RecvTimeoutError::Disconnected) => Err(Error::other("ip reader thread panicked")),
+    fn finish(&mut self) -> Result<ExitStatus> {
+        let mut child = self.child.take().expect("unreaped ip child");
+        // SAFETY: The owned, unreaped child reserves this process group ID.
+        let result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        if result == -1 {
+            let error = Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                log::warn!("Cannot kill ip process group: {error}");
+            }
+        }
+        let deadline = Instant::now() + IP_REAP_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => return Ok(status),
+                Ok(None) => (),
+                Err(error) if error.kind() == ErrorKind::Interrupted => (),
+                Err(error) => return Err(error),
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // A D-state child may leak a zombie; never block or signal its group again.
+                return Err(Error::new(
+                    ErrorKind::TimedOut,
+                    "ip child could not be reaped",
+                ));
+            }
+            std::thread::sleep(remaining.min(IP_POLL));
+        }
     }
 }
 
-fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<std::process::ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
+impl Drop for IpCommand {
+    fn drop(&mut self) {
+        if self.child.is_some()
+            && let Err(error) = self.finish()
+        {
+            log::warn!("Cannot clean up ip child: {error}");
         }
-        if Instant::now() >= deadline {
-            return Err(Error::new(
-                ErrorKind::TimedOut,
-                format!("ip link did not exit within {IP_TIMEOUT:?}"),
-            ));
-        }
-        std::thread::sleep(IP_POLL);
+    }
+}
+
+fn ip_time_left(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(Error::new(
+            ErrorKind::TimedOut,
+            "ip link exceeded its deadline",
+        ))
+    } else {
+        Ok(remaining)
     }
 }
 
