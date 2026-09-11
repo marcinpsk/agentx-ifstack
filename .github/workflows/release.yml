@@ -95,7 +95,8 @@ jobs:
       # `version` builds dist/ through build_command and creates the release, but it
       # never uploads dist_glob_patterns. Only `publish` does that. Publish the exact new
       # tag, because `publish` otherwise defaults to "latest" and would attach the
-      # packages to the previous release when this run bumped nothing.
+      # packages to the previous release when this run bumped nothing. The package set is
+      # checked inside build_command, which runs before the tag exists.
       - name: Run semantic-release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -107,12 +108,4 @@ jobs:
             echo "No new tag, so there is nothing to publish."
             exit 0
           fi
-          test -n "$(find dist -name '*.deb' -print -quit)" || {
-            echo "dist holds no .deb, refusing to publish an incomplete release" >&2
-            exit 1
-          }
-          test -n "$(find dist -name '*.rpm' -print -quit)" || {
-            echo "dist holds no .rpm, refusing to publish an incomplete release" >&2
-            exit 1
-          }
           uv run semantic-release publish --tag "$after"

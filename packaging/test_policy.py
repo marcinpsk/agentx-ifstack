@@ -145,6 +145,38 @@ class PackagingPolicyTests(unittest.TestCase):
         # to the previous tag when nothing was bumped.
         self.assertIn("--tag", commands, "publish must name the tag it uploads to")
 
+    def test_the_build_command_refuses_an_incomplete_package_set(self):
+        """build_command runs before the tag, so a missing format must stop the release.
+
+        Checking after `semantic-release version` is too late: it has already committed,
+        tagged, pushed and created the release by then. Run the real script against a
+        stubbed build so the guard itself is exercised.
+        """
+        def run(produce):
+            with tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / "packaging").mkdir()
+                shutil.copy(
+                    ROOT / "packaging/release-build.sh", work / "packaging/release-build.sh"
+                )
+                (work / "packaging/sync-version.sh").write_text("#!/bin/sh\n")
+                (work / "packaging/build.sh").write_text(
+                    "#!/bin/sh\nset -eu\nmkdir -p dist\n"
+                    + "".join(f"touch dist/pkg{suffix}\n" for suffix in produce)
+                )
+                return subprocess.run(
+                    ["sh", "packaging/release-build.sh"], cwd=work,
+                    capture_output=True, text=True, check=False,
+                )
+
+        self.assertEqual(run([".deb", ".rpm"]).returncode, 0, "a complete set must build")
+        for produce, missing in (([".deb"], ".rpm"), ([".rpm"], ".deb"), ([], "both")):
+            result = run(produce)
+            self.assertNotEqual(
+                result.returncode, 0,
+                f"the build command accepted a package set missing {missing}",
+            )
+
     def test_the_sync_script_carries_a_bump_into_every_version_source(self):
         """Run the real script on a real copy: a stub would not catch cargo drift."""
         bumped = "9.9.9"
