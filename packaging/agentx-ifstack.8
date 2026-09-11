@@ -1,0 +1,105 @@
+.TH AGENTX-IFSTACK 8 "September 2026" "agentx-ifstack" "System Administration"
+.SH NAME
+agentx-ifstack \- serve Linux interface stacks through AgentX
+.SH SYNOPSIS
+.B agentx-ifstack
+.RB [ \-\-config " PATH" ]
+.RB [ \-\-socket " PATH" ]
+.br
+.B agentx-ifstack
+.RB [ \-\-help " | " \-\-version ]
+.SH DESCRIPTION
+.B agentx-ifstack
+serves the IF-MIB ifStackTable to an SNMP master through an AgentX Unix socket.
+Enable
+.B master agentx
+in snmpd.conf before enabling this service.
+.PP
+The daemon runs
+.B ip \-details \-json link show
+in its network namespace to find bonds, bridges, and interface layers.
+It serves GET, GETNEXT, and GETBULK requests.
+Rows use the higher interface index first and the lower interface index second.
+Required zero-index boundary rows are included.
+Writes are rejected.
+.PP
+Topology refresh is demand driven.
+After the cache expires, the next read request refreshes it.
+A refresh failure returns an AgentX processing error.
+The next read request retries the refresh.
+.PP
+The daemon reconnects and registers again when the master disconnects.
+Retry delays start at one second and double to a maximum of 30 seconds.
+A session that lasts at least 30 seconds resets the delay.
+A missing master does not cause the daemon to exit.
+.SH OPTIONS
+.TP
+.BI \-\-config " PATH"
+Read configuration from PATH instead of /etc/agentx-ifstack.toml.
+An explicitly selected file must exist.
+.TP
+.BI \-\-socket " PATH"
+Override the socket in the configuration file.
+.TP
+.B \-\-version
+Print the version and exit.
+.TP
+.BR \-h ", " \-\-help
+Print usage and exit.
+.SH CONFIGURATION
+The configuration file uses TOML and accepts exactly four keys.
+Omitted keys use built-in defaults.
+An absent default file uses all built-in defaults.
+An absent explicit file, malformed TOML, an unknown key, or an invalid value
+causes a nonzero exit before any connection attempt.
+.TP
+.B socket = "/var/agentx/master"
+AgentX master Unix socket path.
+The path must not be empty.
+.TP
+.B refresh = 5
+Seconds to cache interface topology.
+The value must be an integer of at least 1.
+.TP
+.B priority = 127
+AgentX registration priority, from 1 to 255.
+Lower values win when registered regions overlap.
+.TP
+.B log_level = "info"
+Default log filter: error, warn, info, debug, or trace.
+Logs go to standard error without timestamps.
+An idle healthy daemon is quiet at info.
+.PP
+Override order is built-in defaults, then file values, then command-line flags.
+The
+.B RUST_LOG
+environment variable overrides the log filter.
+Restart the process to apply configuration changes.
+.SH FILES
+.TP
+.I /etc/agentx-ifstack.toml
+Default configuration file.
+.TP
+.I /var/agentx/master
+Default AgentX master socket.
+.SH SIGNALS
+SIGTERM and SIGINT terminate the process with their default signal actions.
+There is no configuration reload signal.
+.SH EXIT STATUS
+Zero indicates that help or version output completed.
+A configuration or command-line error exits with status 1.
+During normal operation the process runs until terminated.
+Connection and refresh failures do not terminate it.
+.SH NOTES
+The service runs as root because /var/agentx is normally mode 0700 and owned by root.
+An unprivileged process cannot traverse that directory.
+The systemd unit removes all capabilities and permits Unix and netlink sockets.
+It needs to execute /usr/sbin/ip and read the host network namespace.
+.SH SEE ALSO
+.BR snmpd.conf (5),
+.BR snmpd (8),
+.BR ip-link (8)
+.PP
+RFC 2741, Agent Extensibility (AgentX) Protocol Version 1.
+.br
+RFC 2863, The Interfaces Group MIB.

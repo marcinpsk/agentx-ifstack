@@ -1,0 +1,9 @@
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload || :
+    if [ "$1" -ge 1 ]; then
+        systemctl try-restart agentx-ifstack.service || :
+    fi
+fi
+if [ "$1" -eq 0 ]; then
+    rmdir /usr/share/doc/agentx-ifstack 2>/dev/null || :
+fi

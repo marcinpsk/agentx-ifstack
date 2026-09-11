@@ -1,0 +1,12 @@
+# AgentX master Unix socket.
+socket = "/var/agentx/master"
+
+# Seconds to cache interface topology, at least 1.
+refresh = 5
+
+# AgentX registration priority, from 1 to 255; lower values win.
+priority = 127
+
+# Default stderr log filter: error, warn, info, debug, or trace.
+# RUST_LOG overrides this filter.
+log_level = "info"

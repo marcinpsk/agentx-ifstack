@@ -1,0 +1,10 @@
+[
+  {
+    "ifindex": 1,
+    "ifname": "port1"
+  },
+  {
+    "ifindex": 2,
+    "ifname": "port2"
+  }
+]

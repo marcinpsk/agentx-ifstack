@@ -1,0 +1,73 @@
+name: Build and install packages
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools man-db
+          rustup target add x86_64-unknown-linux-musl
+          cargo install --locked --version 3.8.0 cargo-deb
+          cargo install --locked --version 0.21.0 cargo-generate-rpm
+      - name: Check the man page
+        run: |
+          man --warnings -E UTF-8 -l packaging/agentx-ifstack.8 >/dev/null 2>man-warnings
+          cat man-warnings
+          test ! -s man-warnings
+      - name: Build static packages
+        run: sh packaging/build.sh
+      - name: Verify and score the unit
+        run: |
+          sudo install -m 755 target/x86_64-unknown-linux-musl/release/agentx-ifstack /usr/bin/agentx-ifstack
+          systemd-analyze verify packaging/agentx-ifstack.service 2>unit-warnings
+          cat unit-warnings
+          test ! -s unit-warnings
+          systemd-analyze security --offline=yes packaging/agentx-ifstack.service
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: packages
+          path: dist/*
+          if-no-files-found: error
+
+  debian:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ['12', '13']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packages
+          path: dist
+      - name: Install, inspect, reinstall, remove, and purge
+        run: docker run --rm -v "$PWD:/work:ro" debian:${{ matrix.version }} sh -c 'sh /work/packaging/test-deb.sh /work/dist/*.deb'
+
+  fedora:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: packages
+          path: dist
+      - name: Install, inspect, reinstall, and remove
+        run: docker run --rm -v "$PWD:/work:ro" fedora:latest sh -c 'sh /work/packaging/test-rpm.sh /work/dist/*.rpm'

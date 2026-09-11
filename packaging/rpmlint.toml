@@ -1,0 +1,12 @@
+Filters = [
+    # Reproducible builds deliberately omit BUILDHOST to avoid embedding a build hostname.
+    '^agentx-ifstack\.x86_64: E: no-buildhost-tag$',
+    # This upstream binary package uses Cargo metadata; its packaging changelog ships as the Debian changelog.
+    '^agentx-ifstack\.x86_64: E: no-changelogname-tag$',
+    # The musl executable is static to support multiple distributions.
+    '^agentx-ifstack\.x86_64: E: statically-linked-binary /usr/bin/agentx-ifstack$',
+    # GitHub release artifacts are unsigned RPMs, not distribution repository builds.
+    '^agentx-ifstack\.x86_64: E: no-signature$',
+    # RFC 2741 uses "subagent" for an AgentX protocol participant.
+    "^agentx-ifstack\\.x86_64: E: spelling-error \\('subagent',",
+]

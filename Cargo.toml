@@ -1,0 +1,75 @@
+[package]
+name = "agentx-ifstack"
+version = "0.1.0"
+edition = "2024"
+description = "AgentX subagent serving IF-MIB ifStackTable for Linux bonds, bridges and VLANs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/marcinpsk/agentx-ifstack"
+readme = "README.md"
+keywords = ["snmp", "agentx", "if-mib", "ifstacktable", "linux"]
+categories = ["network-programming", "command-line-utilities"]
+
+[dependencies]
+agentx = "0.1.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false }
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+
+[package.metadata.deb]
+maintainer = "Marcin Zieba <marcinpsk@gmail.com>"
+copyright = "2026 Marcin Zieba"
+license-file = ["packaging/copyright", "0"]
+extended-description = "Serves Linux interface relationships through the AgentX protocol. Reads topology from iproute2 and reconnects when the SNMP master restarts."
+depends = "iproute2, init-system-helpers (>= 1.54~)"
+section = "net"
+priority = "optional"
+changelog = "packaging/changelog"
+conf-files = ["/etc/agentx-ifstack.toml"]
+maintainer-scripts = "packaging/debian"
+assets = [
+    ["target/release/agentx-ifstack", "usr/bin/agentx-ifstack", "755"],
+    ["packaging/agentx-ifstack.toml", "etc/agentx-ifstack.toml", "644"],
+    ["packaging/agentx-ifstack.8", "usr/share/man/man8/agentx-ifstack.8", "644"],
+    ["README.md", "usr/share/doc/agentx-ifstack/README.md", "644"],
+    ["LICENSE-MIT", "usr/share/doc/agentx-ifstack/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/agentx-ifstack/LICENSE-APACHE", "644"],
+    ["packaging/debian/lintian-overrides", "usr/share/lintian/overrides/agentx-ifstack", "644"],
+]
+
+[package.metadata.deb.systemd-units]
+unit-scripts = "packaging"
+enable = false
+start = false
+restart-after-upgrade = true
+stop-on-upgrade = false
+
+[package.metadata.generate-rpm]
+url = "https://github.com/marcinpsk/agentx-ifstack"
+release = "1"
+summary = "AgentX subagent for Linux interface stacks"
+auto-req = "no"
+post_install_script = "packaging/rpm/postinst"
+pre_uninstall_script = "packaging/rpm/prerm"
+post_uninstall_script = "packaging/rpm/postrm"
+assets = [
+    { source = "target/release/agentx-ifstack", dest = "/usr/bin/agentx-ifstack", mode = "755" },
+    { source = "packaging/agentx-ifstack.toml", dest = "/etc/agentx-ifstack.toml", mode = "644", config = "noreplace" },
+    { source = "target/man/agentx-ifstack.8.gz", dest = "/usr/share/man/man8/agentx-ifstack.8.gz", mode = "644", doc = true },
+    { source = "packaging/agentx-ifstack.service", dest = "/usr/lib/systemd/system/agentx-ifstack.service", mode = "644" },
+    { source = "README.md", dest = "/usr/share/doc/agentx-ifstack/README.md", mode = "644", doc = true },
+    { source = "LICENSE-MIT", dest = "/usr/share/doc/agentx-ifstack/LICENSE-MIT", mode = "644", doc = true },
+    { source = "LICENSE-APACHE", dest = "/usr/share/doc/agentx-ifstack/LICENSE-APACHE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+iproute = "*"
+systemd = "*"
