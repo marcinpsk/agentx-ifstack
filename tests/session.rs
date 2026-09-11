@@ -20,9 +20,23 @@ const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 
 const IP_SERVES_LINKS: &str = "#!/bin/sh\n[ \"$*\" = '-details -json link show' ] || exit 2\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n";
 const IP_NEVER_EXITS: &str = "#!/bin/sh\nexec /bin/sleep 600\n";
-// Exits at once, but a descendant keeps the inherited stdout pipe open.
-const IP_LEAKS_ITS_PIPE: &str =
-    "#!/bin/sh\n/bin/sleep 600 &\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n";
+// Exits at once, but a descendant keeps the inherited stdout pipe open. The
+// descendant records its pid so a test can prove it was cleaned up.
+const IP_LEAKS_ITS_PIPE: &str = concat!(
+    "#!/bin/sh\n",
+    "/bin/sleep 600 &\n",
+    "echo $! > \"$IFSTACK_TEST_PIDFILE\"\n",
+    "exec /bin/cat \"$IFSTACK_TEST_LINKS\"\n",
+);
+// Escapes the process group with setsid, so killing the group cannot reach it.
+const IP_ESCAPES_ITS_GROUP: &str = concat!(
+    "#!/bin/sh\n",
+    "/usr/bin/setsid /bin/sleep 600 &\n",
+    "echo $! > \"$IFSTACK_TEST_PIDFILE\"\n",
+    "exec /bin/cat \"$IFSTACK_TEST_LINKS\"\n",
+);
+// Never stops writing, so the captured output must be bounded.
+const IP_FLOODS_STDOUT: &str = "#!/bin/sh\nexec /usr/bin/yes 0123456789abcdef\n";
 
 fn write_ip(directory: &std::path::Path, script: &str) {
     let ip = directory.join("ip");
@@ -74,6 +88,7 @@ impl Master {
         let child = command
             .env("PATH", &directory)
             .env("IFSTACK_TEST_LINKS", directory.join("links.json"))
+            .env("IFSTACK_TEST_PIDFILE", directory.join("descendant.pid"))
             .spawn()
             .unwrap();
         Self {
@@ -149,6 +164,35 @@ impl Master {
 
     fn leak_ip_pipe(&self) {
         write_ip(&self.directory, IP_LEAKS_ITS_PIPE);
+    }
+
+    fn escape_ip_group(&self) {
+        write_ip(&self.directory, IP_ESCAPES_ITS_GROUP);
+    }
+
+    fn flood_ip(&self) {
+        write_ip(&self.directory, IP_FLOODS_STDOUT);
+    }
+
+    /// Peak resident memory of the daemon, in KiB, from the kernel's own accounting.
+    fn peak_rss_kib(&self) -> u64 {
+        let status = fs::read_to_string(format!("/proc/{}/status", self.child.id())).unwrap();
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|value| value.split_whitespace().next())
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// The pid the leaked-pipe stub recorded for its background descendant.
+    fn descendant_pid(&self) -> i32 {
+        fs::read_to_string(self.directory.join("descendant.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
     }
 }
 
@@ -607,6 +651,112 @@ fn an_ip_descendant_holding_the_pipe_does_not_wedge_the_session() {
     assert!(
         started.elapsed() < Duration::from_secs(45),
         "a leaked ip pipe blocked the request loop for {:?}",
+        started.elapsed()
+    );
+
+    master.restore_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+}
+
+/// True while the process is still running. A killed descendant stays visible as a
+/// zombie until something reaps it, and `kill -0` succeeds for a zombie, so read the
+/// state field instead: `Z` means it has already died.
+fn process_alive(pid: i32) -> bool {
+    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The comm field is parenthesised and may contain spaces, so start after it.
+    let state = stat
+        .rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next());
+    !matches!(state, None | Some("Z"))
+}
+
+#[test]
+fn a_leaked_ip_descendant_is_killed_rather_than_left_running() {
+    let master = Master::start_with_config(Some("refresh = 1\n"), false);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut request = || exchange(&mut stream, &get.to_bytes().unwrap());
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+
+    master.leak_ip_pipe();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(request().res_error, ResError::ProcessingError);
+
+    let descendant = master.descendant_pid();
+    // The direct child is already reaped, so only killing its process group reaches this.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while process_alive(descendant) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !process_alive(descendant),
+        "leaked ip descendant {descendant} is still running"
+    );
+}
+
+#[test]
+fn an_ip_that_never_stops_writing_is_bounded() {
+    let master = Master::start_with_config(Some("refresh = 1\n"), false);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(90)))
+        .unwrap();
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut request = || exchange(&mut stream, &get.to_bytes().unwrap());
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+
+    master.flood_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    let started = Instant::now();
+    assert_eq!(request().res_error, ResError::ProcessingError);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "an endless ip blocked the request loop for {:?}",
+        started.elapsed()
+    );
+
+    // The deadline alone does not bound allocation: an unbounded read_to_end can take
+    // hundreds of megabytes before three seconds elapse.
+    let peak = master.peak_rss_kib();
+    assert!(
+        peak < 128 * 1024,
+        "peak resident memory reached {peak} KiB while ip flooded stdout"
+    );
+
+    master.restore_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+}
+
+#[test]
+fn an_ip_descendant_outside_the_group_still_does_not_wedge_the_session() {
+    let master = Master::start_with_config(Some("refresh = 1\n"), false);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut request = || exchange(&mut stream, &get.to_bytes().unwrap());
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+
+    // setsid puts the descendant in its own session, so group cleanup cannot reach it.
+    // The request must still come back; waiting for the readers would hang forever.
+    master.escape_ip_group();
+    std::thread::sleep(Duration::from_millis(1100));
+    let started = Instant::now();
+    assert_eq!(request().res_error, ResError::ProcessingError);
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "an escaped ip descendant blocked the request loop for {:?}",
         started.elapsed()
     );
 

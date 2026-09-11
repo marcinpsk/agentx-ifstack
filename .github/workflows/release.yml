@@ -66,9 +66,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # The token is used for the fetch but deliberately not persisted: the later
+      # cargo install and uv sync steps run third-party code that could read it from
+      # .git/config. semantic-release pushes with its own token-built remote URL
+      # (hvcs/github.py remote_url), so it needs no stored credential.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
           token: ${{ secrets.RELEASE_TOKEN }}
       # actions/checkout fetches with --no-tags, so annotated tag objects can be
       # missing even with fetch-tags. Re-fetch so semantic-release can dereference

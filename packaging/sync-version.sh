@@ -10,8 +10,29 @@ import email.utils
 import os
 import pathlib
 import re
+import tempfile
 import time
 import tomllib
+
+
+def write_if_changed(path, content):
+    """Replace path atomically, and not at all when it already matches.
+
+    A plain write truncates first, so an interruption leaves the file empty and every
+    later retry fails on a file it destroyed itself.
+    """
+    if path.exists() and path.read_text() == content:
+        return
+    handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w") as new:
+            new.write(content)
+            new.flush()
+            os.fsync(new.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        pathlib.Path(temporary).unlink(missing_ok=True)
+        raise
 
 manifest = tomllib.loads(pathlib.Path("Cargo.toml").read_text())
 version = manifest["package"]["version"]
@@ -19,20 +40,21 @@ maintainer = manifest["package"]["metadata"]["deb"]["maintainer"]
 
 changelog = pathlib.Path("packaging/changelog")
 existing = changelog.read_text()
-if re.match(rf"^agentx-ifstack \({re.escape(version)}-\d+\) ", existing):
-    raise SystemExit(0)  # already recorded, keep the build command idempotent
-
-# Honour SOURCE_DATE_EPOCH so a rebuild of the same release is reproducible.
-stamp = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
-released = email.utils.formatdate(stamp, usegmt=True)
-entry = (
-    f"agentx-ifstack ({version}-1) unstable; urgency=medium\n"
-    f"\n"
-    f"  * Release {version}. See CHANGELOG.md for the change list.\n"
-    f"\n"
-    f" -- {maintainer}  {released}\n"
-)
-changelog.write_text(f"{entry}\n{existing}" if existing.strip() else entry)
+# Skip only the insertion when this version is already the newest stanza. Exiting here
+# would leave a run that died between the two writes with a stale Cargo.lock, and the
+# retry would not repair it.
+if not re.match(rf"^agentx-ifstack \({re.escape(version)}-\d+\) ", existing):
+    # Honour SOURCE_DATE_EPOCH so a rebuild of the same release is reproducible.
+    stamp = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
+    released = email.utils.formatdate(stamp, usegmt=True)
+    entry = (
+        f"agentx-ifstack ({version}-1) unstable; urgency=medium\n"
+        f"\n"
+        f"  * Release {version}. See CHANGELOG.md for the change list.\n"
+        f"\n"
+        f" -- {maintainer}  {released}\n"
+    )
+    write_if_changed(changelog, f"{entry}\n{existing}" if existing.strip() else entry)
 
 # Cargo.lock records this package's own version. Rewrite just that line rather than
 # shelling out to cargo, which would need a populated registry cache to run offline.
@@ -45,6 +67,6 @@ pattern = re.compile(
 updated, count = pattern.subn(rf"\g<1>{version}\g<2>", text)
 if count != 1:
     raise SystemExit(f"Cargo.lock holds {count} agentx-ifstack entries, expected 1")
-lock.write_text(updated)
+write_if_changed(lock, updated)
 PY
 

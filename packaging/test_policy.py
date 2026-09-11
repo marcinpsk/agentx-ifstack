@@ -147,6 +147,65 @@ class PackagingPolicyTests(unittest.TestCase):
             self.assertIn(f"agentx-ifstack ({manifest_version()}-1) ",
                           (work / "packaging/changelog").read_text())
 
+    def test_the_sync_script_finishes_a_half_applied_run(self):
+        """A retry after a crash between the two writes must still fix Cargo.lock."""
+        bumped = "9.9.9"
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name in ("Cargo.toml", "Cargo.lock"):
+                shutil.copy(ROOT / name, work / name)
+            (work / "packaging").mkdir()
+            shutil.copy(ROOT / "packaging/sync-version.sh", work / "packaging/sync-version.sh")
+            manifest = (work / "Cargo.toml").read_text()
+            (work / "Cargo.toml").write_text(
+                manifest.replace(f'version = "{manifest_version()}"', f'version = "{bumped}"', 1)
+            )
+            # The state a crash between the changelog write and the lock write leaves:
+            # the changelog already names the new version, Cargo.lock still does not.
+            (work / "packaging/changelog").write_text(
+                f"agentx-ifstack ({bumped}-1) unstable; urgency=medium\n"
+                f"\n  * Release {bumped}.\n\n -- A B <a@b.invalid>  "
+                f"Thu, 11 Sep 2026 00:00:00 +0000\n"
+            )
+
+            subprocess.run(
+                ["sh", "packaging/sync-version.sh"], cwd=work, check=True,
+                capture_output=True, text=True,
+            )
+
+            lock = tomllib.loads((work / "Cargo.lock").read_text())
+            locked = [p for p in lock["package"] if p["name"] == "agentx-ifstack"]
+            self.assertEqual(
+                [p["version"] for p in locked], [bumped],
+                "a retry left Cargo.lock stale, so cargo build --locked would fail",
+            )
+            # The changelog must not gain a second stanza for the same version.
+            body = (work / "packaging/changelog").read_text()
+            self.assertEqual(body.count(f"agentx-ifstack ({bumped}-1)"), 1)
+
+    def test_a_synchronised_retry_does_not_rewrite_anything(self):
+        """Rewriting an already-correct file opens a truncation window for no gain."""
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name in ("Cargo.toml", "Cargo.lock"):
+                shutil.copy(ROOT / name, work / name)
+            (work / "packaging").mkdir()
+            for name in ("changelog", "sync-version.sh"):
+                shutil.copy(ROOT / "packaging" / name, work / "packaging" / name)
+
+            def run():
+                subprocess.run(
+                    ["sh", "packaging/sync-version.sh"], cwd=work, check=True,
+                    capture_output=True, text=True,
+                )
+
+            run()
+            watched = [work / "Cargo.lock", work / "packaging/changelog"]
+            before = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in watched]
+            run()
+            after = [(p.stat().st_ino, p.stat().st_mtime_ns) for p in watched]
+            self.assertEqual(before, after, "a no-op retry rewrote a file")
+
     def test_permanent_errors_do_not_restart_and_crashes_are_limited(self):
         unit = configparser.ConfigParser(interpolation=None)
         unit.read(ROOT / "packaging/agentx-ifstack.service")
@@ -168,6 +227,21 @@ class PackagingPolicyTests(unittest.TestCase):
                 if not PINNED_ACTION.match(reference):
                     unpinned.append(f"{path.name} {reference}")
         self.assertEqual(unpinned, [], "third-party actions must be pinned to a SHA")
+
+    def test_no_workflow_checkout_persists_its_credential(self):
+        """actions/checkout leaves the token in .git/config, where any later step reads it."""
+        persisting = []
+        for path in sorted(workflow_paths()):
+            document = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+            for job_name, job in (document.get("jobs") or {}).items():
+                for step in (job or {}).get("steps") or []:
+                    if not isinstance(step, dict):
+                        continue
+                    if not str(step.get("uses", "")).startswith("actions/checkout@"):
+                        continue
+                    if (step.get("with") or {}).get("persist-credentials") != "false":
+                        persisting.append(f"{path.name}:{job_name}")
+        self.assertEqual(persisting, [], "checkout must not persist credentials")
 
     def test_package_scripts_use_private_temporary_files(self):
         """A predictable temporary path lets a local user redirect a root-run write."""

@@ -1,7 +1,9 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use agentx::ByteOrder;
@@ -19,6 +21,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(5);
 // Must stay below the session timeout above so a slow ip still leaves time to answer.
 const IP_TIMEOUT: Duration = Duration::from_secs(3);
 const IP_POLL: Duration = Duration::from_millis(20);
+// A runaway ip can write gigabytes well inside IP_TIMEOUT, so the capture is bounded
+// too. 16 MiB is far above any real `ip link show`, which is ~1.4 KiB per interface.
+const MAX_IP_OUTPUT: u64 = 16 * 1024 * 1024;
+// How long to wait for a reader to notice the group kill before abandoning it.
+const IP_REAP_GRACE: Duration = Duration::from_millis(500);
 const MAX_PAYLOAD: u32 = 1024 * 1024;
 const MAX_OID_SUBIDS: usize = 128;
 const NOT_WRITABLE: u16 = 17;
@@ -244,41 +251,105 @@ fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
-/// Runs `ip link show` under a deadline. An `ip` that never exits, or whose output a
-/// descendant keeps open, must not wedge the single-threaded request loop, so the wait
-/// and both pipe reads share one deadline and the child is killed when it expires.
+/// Runs `ip link show` under a deadline. An `ip` that never exits, whose output a
+/// descendant keeps open, or that never stops writing must not wedge or exhaust the
+/// single-threaded request loop.
 fn read_links() -> Result<Vec<u8>> {
     let mut child = Command::new("ip")
         .args(["-details", "-json", "link", "show"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own group, so a descendant that outlives ip can still be signalled.
+        .process_group(0)
         .spawn()?;
+    let group = child.id() as i32;
     let deadline = Instant::now() + IP_TIMEOUT;
     // Drain both pipes concurrently; a full pipe would otherwise block the child forever.
-    let stdout = drain(child.stdout.take().expect("piped stdout"));
-    let stderr = drain(child.stderr.take().expect("piped stderr"));
-    let status = wait_bounded(&mut child, deadline)?;
-    // A reader still blocked here means a descendant inherited the pipe. Abandon it
-    // rather than block the request loop; it ends when that descendant does.
-    let stdout = collect_bounded(&stdout, deadline)?;
-    let stderr = collect_bounded(&stderr, deadline)?;
-    if !status.success() {
-        return Err(Error::other(format!(
-            "ip link exited with {}: {}",
-            status,
-            String::from_utf8_lossy(&stderr).trim()
-        )));
+    let (stdout_reader, stdout) = drain(child.stdout.take().expect("piped stdout"));
+    let (stderr_reader, stderr) = drain(child.stderr.take().expect("piped stderr"));
+
+    let status = match wait_bounded(&mut child, deadline) {
+        Ok(status) => status,
+        Err(error) => {
+            // ip is still running, so its pid is unreaped and the group is certainly ours.
+            kill_group(group);
+            let _ = child.wait();
+            release(stdout_reader, &stdout);
+            release(stderr_reader, &stderr);
+            return Err(error);
+        }
+    };
+
+    match (
+        collect_bounded(&stdout, deadline),
+        collect_bounded(&stderr, deadline),
+    ) {
+        (Ok(stdout), Ok(stderr)) => {
+            // Both pipes reached EOF and ip is reaped, so nothing of ours is left to
+            // signal. Killing here could reach an unrelated group that has since been
+            // given this pid number.
+            if status.success() {
+                Ok(stdout)
+            } else {
+                Err(Error::other(format!(
+                    "ip link exited with {}: {}",
+                    status,
+                    String::from_utf8_lossy(&stderr).trim()
+                )))
+            }
+        }
+        (stdout_result, stderr_result) => {
+            // A pipe is still held open, so the group still has a member and its pid
+            // number cannot have been recycled.
+            kill_group(group);
+            release(stdout_reader, &stdout);
+            release(stderr_reader, &stderr);
+            Err(stdout_result
+                .err()
+                .or_else(|| stderr_result.err())
+                .expect("a non-Ok pair has at least one error"))
+        }
     }
-    Ok(stdout)
 }
 
-fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<Result<Vec<u8>>> {
+/// Reaps a reader thread if the group kill freed it, and abandons it otherwise. A
+/// descendant that left the group with setsid keeps its pipe open forever, so joining
+/// unconditionally would wedge the request loop this function exists to protect.
+fn release(reader: JoinHandle<()>, channel: &Receiver<Result<Vec<u8>>>) {
+    if channel.recv_timeout(IP_REAP_GRACE).is_ok() {
+        let _ = reader.join();
+    }
+}
+
+fn kill_group(group: i32) {
+    // SAFETY: `group` is our own child's process group, created by process_group(0).
+    // A group that has already exited returns ESRCH, which is not an error here.
+    unsafe { libc::kill(-group, libc::SIGKILL) };
+}
+
+type Reader = (JoinHandle<()>, Receiver<Result<Vec<u8>>>);
+
+fn drain(pipe: impl Read + Send + 'static) -> Reader {
     let (sender, receiver) = mpsc::channel();
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = sender.send(pipe.read_to_end(&mut bytes).map(|_| bytes));
+        // Read one byte past the limit so exceeding it is distinguishable from meeting it.
+        let result = pipe
+            .take(MAX_IP_OUTPUT + 1)
+            .read_to_end(&mut bytes)
+            .and_then(|_| {
+                if bytes.len() as u64 > MAX_IP_OUTPUT {
+                    Err(Error::new(
+                        ErrorKind::InvalidData,
+                        format!("ip link wrote more than {MAX_IP_OUTPUT} bytes"),
+                    ))
+                } else {
+                    Ok(bytes)
+                }
+            });
+        let _ = sender.send(result);
     });
-    receiver
+    (handle, receiver)
 }
 
 fn collect_bounded(reader: &Receiver<Result<Vec<u8>>>, deadline: Instant) -> Result<Vec<u8>> {
@@ -298,8 +369,6 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<std::process::Ex
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            child.kill()?;
-            child.wait()?;
             return Err(Error::new(
                 ErrorKind::TimedOut,
                 format!("ip link did not exit within {IP_TIMEOUT:?}"),
