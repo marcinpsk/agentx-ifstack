@@ -361,6 +361,40 @@ class PackagingPolicyTests(unittest.TestCase):
                         persisting.append(f"{path.name}:{job_name}")
         self.assertEqual(persisting, [], "checkout must not persist credentials")
 
+    def test_the_custom_ruleset_adds_to_coderabbit_instead_of_replacing_it(self):
+        """CodeRabbit runs a detected opengrep config INSTEAD OF its default packs.
+
+        A file named opengrep.yml or semgrep.yml would silently replace that coverage,
+        so the ruleset carries a name CodeRabbit does not adopt and is passed with
+        --config instead.
+        """
+        for name in (
+            ".semgrep.yaml", ".semgrep.yml", "semgrep.yaml", "semgrep.yml",
+            ".opengrep.yaml", ".opengrep.yml", "opengrep.yaml", "opengrep.yml",
+        ):
+            self.assertFalse(
+                (ROOT / name).exists(),
+                f"{name} would replace CodeRabbit's own opengrep packs",
+            )
+        ruleset = ROOT / ".opengrep/agentx-ifstack-rules.yaml"
+        self.assertTrue(ruleset.exists(), "the custom ruleset is missing")
+
+        # Every rule needs a fixture, or it can silently stop matching.
+        rules = yaml.safe_load(ruleset.read_text())["rules"]
+        self.assertTrue(rules, "the ruleset declares no rules")
+        for rule in rules:
+            fixture = ROOT / ".opengrep/tests" / f"{rule['id']}.rs"
+            self.assertTrue(
+                fixture.exists(), f"rule {rule['id']} has no rule-test fixture"
+            )
+
+        steps = workflow("checks.yml")["jobs"]["rules"]["steps"]
+        commands = "\n".join(str(step.get("run", "")) for step in steps)
+        self.assertIn("opengrep-test.sh", commands, "CI must run the rule-tests")
+        self.assertIn("opengrep-scan.sh", commands, "CI must run the ruleset")
+        # The binary is fetched over the network, so pin it by digest.
+        self.assertIn("sha256sum -c -", commands, "pin the opengrep binary by checksum")
+
     def test_package_scripts_use_private_temporary_files(self):
         """A predictable temporary path lets a local user redirect a root-run write."""
         offenders = []

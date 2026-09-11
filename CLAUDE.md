@@ -52,6 +52,11 @@ Lint levels live in `Cargo.toml` under `[lints]`, so a plain `cargo clippy` fail
 same code CI rejects. `cargo deny` needs `cargo install --locked cargo-deny`; CI runs it
 as a separate job in `checks.yml`.
 
+Project invariants that clippy cannot express live in `.opengrep/agentx-ifstack-rules.yaml`.
+Run `scripts/opengrep-scan.sh` to check the source and `scripts/opengrep-test.sh` to check
+the rules themselves. Every rule needs a fixture in `.opengrep/tests/`, which the packaging
+policy tests enforce. See `.opengrep/README.md` for why the filename matters.
+
 `rust-toolchain.toml` pins the toolchain, but a `RUSTUP_TOOLCHAIN` environment variable
 overrides it. Check that variable before blaming a build failure on the code.
 
