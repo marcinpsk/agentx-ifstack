@@ -1,6 +1,7 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::unix::net::UnixStream;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use agentx::ByteOrder;
@@ -15,6 +16,9 @@ use crate::{
 
 const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+// Must stay below the session timeout above so a slow ip still leaves time to answer.
+const IP_TIMEOUT: Duration = Duration::from_secs(3);
+const IP_POLL: Duration = Duration::from_millis(20);
 const MAX_PAYLOAD: u32 = 1024 * 1024;
 const MAX_OID_SUBIDS: usize = 128;
 const NOT_WRITABLE: u16 = 17;
@@ -240,6 +244,71 @@ fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
+/// Runs `ip link show` under a deadline. An `ip` that never exits, or whose output a
+/// descendant keeps open, must not wedge the single-threaded request loop, so the wait
+/// and both pipe reads share one deadline and the child is killed when it expires.
+fn read_links() -> Result<Vec<u8>> {
+    let mut child = Command::new("ip")
+        .args(["-details", "-json", "link", "show"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + IP_TIMEOUT;
+    // Drain both pipes concurrently; a full pipe would otherwise block the child forever.
+    let stdout = drain(child.stdout.take().expect("piped stdout"));
+    let stderr = drain(child.stderr.take().expect("piped stderr"));
+    let status = wait_bounded(&mut child, deadline)?;
+    // A reader still blocked here means a descendant inherited the pipe. Abandon it
+    // rather than block the request loop; it ends when that descendant does.
+    let stdout = collect_bounded(&stdout, deadline)?;
+    let stderr = collect_bounded(&stderr, deadline)?;
+    if !status.success() {
+        return Err(Error::other(format!(
+            "ip link exited with {}: {}",
+            status,
+            String::from_utf8_lossy(&stderr).trim()
+        )));
+    }
+    Ok(stdout)
+}
+
+fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<Result<Vec<u8>>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = sender.send(pipe.read_to_end(&mut bytes).map(|_| bytes));
+    });
+    receiver
+}
+
+fn collect_bounded(reader: &Receiver<Result<Vec<u8>>>, deadline: Instant) -> Result<Vec<u8>> {
+    match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => Err(Error::new(
+            ErrorKind::TimedOut,
+            "ip link output was still open after the deadline",
+        )),
+        Err(RecvTimeoutError::Disconnected) => Err(Error::other("ip reader thread panicked")),
+    }
+}
+
+fn wait_bounded(child: &mut Child, deadline: Instant) -> Result<std::process::ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            return Err(Error::new(
+                ErrorKind::TimedOut,
+                format!("ip link did not exit within {IP_TIMEOUT:?}"),
+            ));
+        }
+        std::thread::sleep(IP_POLL);
+    }
+}
+
 struct Cache {
     topology: Option<(Instant, Mib)>,
     refresh: Duration,
@@ -252,17 +321,8 @@ impl Cache {
             .as_ref()
             .is_none_or(|(updated, _)| updated.elapsed() >= self.refresh)
         {
-            let output = Command::new("ip")
-                .args(["-details", "-json", "link", "show"])
-                .output()?;
-            if !output.status.success() {
-                return Err(Error::other(format!(
-                    "ip link exited with {}: {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                )));
-            }
-            let json = std::str::from_utf8(&output.stdout)
+            let stdout = read_links()?;
+            let json = std::str::from_utf8(&stdout)
                 .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
             let mib = Mib::new(link::parse(json)?);
             self.topology = Some((Instant::now(), mib));

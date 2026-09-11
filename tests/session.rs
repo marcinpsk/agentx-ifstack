@@ -18,6 +18,18 @@ use agentx::pdu::{self, Header, ResError, Response, Type};
 static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 
+const IP_SERVES_LINKS: &str = "#!/bin/sh\n[ \"$*\" = '-details -json link show' ] || exit 2\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n";
+const IP_NEVER_EXITS: &str = "#!/bin/sh\nexec /bin/sleep 600\n";
+// Exits at once, but a descendant keeps the inherited stdout pipe open.
+const IP_LEAKS_ITS_PIPE: &str =
+    "#!/bin/sh\n/bin/sleep 600 &\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n";
+
+fn write_ip(directory: &std::path::Path, script: &str) {
+    let ip = directory.join("ip");
+    fs::write(&ip, script).unwrap();
+    fs::set_permissions(&ip, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 struct Master {
     directory: PathBuf,
     listener: UnixListener,
@@ -44,9 +56,7 @@ impl Master {
             include_str!("fixtures/bond.json"),
         )
         .unwrap();
-        let ip = directory.join("ip");
-        fs::write(&ip, "#!/bin/sh\n[ \"$*\" = '-details -json link show' ] || exit 2\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n").unwrap();
-        fs::set_permissions(&ip, fs::Permissions::from_mode(0o700)).unwrap();
+        write_ip(&directory, IP_SERVES_LINKS);
         let mut command = Command::new(env!("CARGO_BIN_EXE_agentx-ifstack"));
         if let Some(config) = config {
             let configured_socket = if socket_override {
@@ -127,6 +137,18 @@ impl Master {
 
     fn topology(&self, json: &str) {
         fs::write(self.directory.join("links.json"), json).unwrap();
+    }
+
+    fn stall_ip(&self) {
+        write_ip(&self.directory, IP_NEVER_EXITS);
+    }
+
+    fn restore_ip(&self) {
+        write_ip(&self.directory, IP_SERVES_LINKS);
+    }
+
+    fn leak_ip_pipe(&self) {
+        write_ip(&self.directory, IP_LEAKS_ITS_PIPE);
     }
 }
 
@@ -535,4 +557,60 @@ fn cli_socket_overrides_config_socket_on_wire() {
             .data,
         Value::Integer(1)
     );
+}
+
+#[test]
+fn a_stalled_ip_does_not_wedge_the_session() {
+    let master = Master::start_with_config(Some("refresh = 1\n"), false);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut request = || exchange(&mut stream, &get.to_bytes().unwrap());
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+
+    // `ip` hangs instead of exiting, so the refresh must give up rather than block.
+    master.stall_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    let started = Instant::now();
+    let response = request();
+    assert_eq!(response.res_error, ResError::ProcessingError);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "a stalled ip blocked the request loop for {:?}",
+        started.elapsed()
+    );
+
+    master.restore_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+}
+
+#[test]
+fn an_ip_descendant_holding_the_pipe_does_not_wedge_the_session() {
+    let master = Master::start_with_config(Some("refresh = 1\n"), false);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .unwrap();
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut request = || exchange(&mut stream, &get.to_bytes().unwrap());
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
+
+    master.leak_ip_pipe();
+    std::thread::sleep(Duration::from_millis(1100));
+    let started = Instant::now();
+    assert_eq!(request().res_error, ResError::ProcessingError);
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "a leaked ip pipe blocked the request loop for {:?}",
+        started.elapsed()
+    );
+
+    master.restore_ip();
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(request().vb.unwrap().0[0].data, Value::Integer(1));
 }
