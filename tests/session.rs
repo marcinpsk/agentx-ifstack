@@ -907,7 +907,9 @@ fn a_successful_ip_kills_descendants_that_closed_their_pipes() {
     );
     let pid = master.descendant_pid();
     let _descendant = Descendant::track(pid);
-    let deadline = Instant::now() + Duration::from_secs(1);
+    // SIGKILL still needs the descendant scheduled, so allow what the leaked-descendant
+    // test already allows.
+    let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
