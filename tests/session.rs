@@ -26,6 +26,10 @@ struct Master {
 
 impl Master {
     fn start() -> Self {
+        Self::start_with_config(Some(""), true)
+    }
+
+    fn start_with_config(config: Option<&str>, socket_override: bool) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "ifstack-test-{}-{}",
             std::process::id(),
@@ -43,8 +47,21 @@ impl Master {
         let ip = directory.join("ip");
         fs::write(&ip, "#!/bin/sh\n[ \"$*\" = '-details -json link show' ] || exit 2\nexec /bin/cat \"$IFSTACK_TEST_LINKS\"\n").unwrap();
         fs::set_permissions(&ip, fs::Permissions::from_mode(0o700)).unwrap();
-        let child = Command::new(env!("CARGO_BIN_EXE_agentx-ifstack"))
-            .args(["--socket", socket.to_str().unwrap()])
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agentx-ifstack"));
+        if let Some(config) = config {
+            let configured_socket = if socket_override {
+                directory.join("unused")
+            } else {
+                socket.clone()
+            };
+            let path = directory.join("config.toml");
+            fs::write(&path, format!("socket = {configured_socket:?}\n{config}")).unwrap();
+            command.arg("--config").arg(path);
+        }
+        if socket_override {
+            command.arg("--socket").arg(&socket);
+        }
+        let child = command
             .env("PATH", &directory)
             .env("IFSTACK_TEST_LINKS", directory.join("links.json"))
             .spawn()
@@ -57,6 +74,10 @@ impl Master {
     }
 
     fn connect(&self, flags: u8, session_id: u32) -> UnixStream {
+        self.connect_with_priority(flags, session_id, 127)
+    }
+
+    fn connect_with_priority(&self, flags: u8, session_id: u32, priority: u8) -> UnixStream {
         let deadline = Instant::now() + Duration::from_secs(12);
         let mut stream = loop {
             match self.listener.accept() {
@@ -95,7 +116,7 @@ impl Master {
             register.subtree,
             ID::from_str("1.3.6.1.2.1.31.1.2").unwrap()
         );
-        assert_eq!(register.priority, 127);
+        assert_eq!(register.priority, priority);
         assert_eq!(register.range_subid, 0);
         assert_eq!(register.context, None);
         let mut response = Response::from_header(&register.header);
@@ -477,4 +498,41 @@ fn cache_refresh_changes_wire_values_and_reports_invalid_output() {
         Value::Integer(1)
     );
     close(&mut stream, NETWORK_ORDER, 100);
+}
+
+#[test]
+fn config_drives_socket_registration_and_cache_window_on_wire() {
+    let master = Master::start_with_config(Some("refresh = 1\npriority = 42\n"), false);
+    let mut stream = master.connect_with_priority(NETWORK_ORDER, 100, 42);
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    let mut value = || {
+        exchange(&mut stream, &get.to_bytes().unwrap())
+            .vb
+            .unwrap()
+            .0[0]
+            .data
+            .clone()
+    };
+    assert_eq!(value(), Value::Integer(1));
+    master.topology(include_str!("fixtures/plain.json"));
+    assert_eq!(value(), Value::Integer(1));
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(value(), Value::NoSuchInstance);
+}
+
+#[test]
+fn cli_socket_overrides_config_socket_on_wire() {
+    let master = Master::start_with_config(Some(""), true);
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    let mut get = pdu::Get::new(ranges(".10.2"));
+    get.header = header(Type::Get, NETWORK_ORDER, 100, 3);
+    assert_eq!(
+        exchange(&mut stream, &get.to_bytes().unwrap())
+            .vb
+            .unwrap()
+            .0[0]
+            .data,
+        Value::Integer(1)
+    );
 }

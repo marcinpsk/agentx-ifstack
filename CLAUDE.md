@@ -4,19 +4,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An AgentX (RFC 2741) subagent that serves IF-MIB `ifStackTable` (`1.3.6.1.2.1.31.1.2`)
-on Linux hosts. net-snmp implements neither `ifStackTable` nor `IEEE8023-LAG-MIB`, so a
-Linux host exposes no stack rows for its bonds, bridges or VLANs. This subagent is the
-only missing hop between the kernel's view of those relationships and an SNMP poller.
+An AgentX (RFC 2741) subagent that serves IF-MIB `ifStackTable`
+(`1.3.6.1.2.1.31.1.2`) on Linux hosts. Read `README.md` first for runtime
+behavior, package commands, and the table model.
 
-For the LAG half, the plugin identifies the aggregate by ifType `ieee8023adLag` or a
-configured name pattern. Linux bonds report `ethernetCsmacd`, so a `PortStackLagPattern`
-regex like `^bond\d+$` must be configured for `linux` and `proxmox`. Sub-interfaces need
-no configuration; they are paired by the `.N` name suffix.
-
-Read `README.md` first for runtime behavior, test commands, and the source-verified
-research. `link.rs` parses topology, `mib.rs` serves ordered rows, `session.rs` handles
+`config.rs` validates CLI and file settings before supervision starts.
+`link.rs` parses topology, `mib.rs` serves ordered rows, `session.rs` handles
 AgentX and refresh I/O, and `main.rs` supervises reconnection.
+
+## Configuration and packages
+
+Keep the configuration limited to socket, refresh, priority, and log_level.
+An absent default file is allowed. An explicit missing file or invalid file
+must fail before the supervise loop. Tests use real temporary files and the
+actual binary with an AgentX UnixListener.
+
+When changing packaging, run `sh packaging/build.sh` and the container commands
+in README.md. The reusable packages workflow gates releases on installation,
+reinstall, and removal checks in Debian 12, Debian 13, and Fedora.
+The build script remaps compiler source paths to keep build-user information
+out of release binaries. Keep the artifact checks in that script.
+
+Use cargo-deb's systemd integration for Debian maintainer scripts. RPM scriptlets
+must also work without a running systemd manager. Initial installation leaves
+the service disabled and stopped. Upgrades restart only an active service.
+Preserve local configuration edits in both formats.
+
+The unit runs as root to traverse /var/agentx, with an empty capability set.
+Keep the host network namespace and allow AF_UNIX, AF_NETLINK, and execution
+of ip. Offline unit analysis does not prove live sandbox compatibility.
+See README.md for the documented lint exceptions. Keep package contents and
+examples free of private project references and build-machine identifiers.
 
 ## Build and test
 

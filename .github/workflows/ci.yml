@@ -1,0 +1,16 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    uses: ./.github/workflows/checks.yml
+
+  packages:
+    uses: ./.github/workflows/packages.yml

@@ -1,0 +1,4 @@
+# This upstream package has no Debian intent-to-package bug.
+agentx-ifstack: initial-upload-closes-no-bugs [usr/share/doc/agentx-ifstack/changelog.Debian.gz:1]
+# The musl static PIE has no shared library prerequisites.
+agentx-ifstack: shared-library-lacks-prerequisites [usr/bin/agentx-ifstack]

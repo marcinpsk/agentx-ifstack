@@ -1,6 +1,5 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -9,21 +8,22 @@ use agentx::encodings::{ID, Value, VarBindList};
 use agentx::pdu::{self, Header, ResError, Response, Type};
 
 use crate::{
+    config::Config,
     link,
     mib::{Mib, TABLE},
 };
 
 const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-const CACHE_MAX: Duration = Duration::from_secs(5);
 const MAX_PAYLOAD: u32 = 1024 * 1024;
 const MAX_OID_SUBIDS: usize = 128;
 const NOT_WRITABLE: u16 = 17;
 const COMMIT_FAILED: u16 = 14;
 const UNDO_FAILED: u16 = 15;
 
-pub fn run(socket: &Path) -> Result<()> {
-    let mut stream = UnixStream::connect(socket)?;
+pub fn run(config: &Config) -> Result<()> {
+    log::info!("Connecting to AgentX master at {}", config.socket.display());
+    let mut stream = UnixStream::connect(&config.socket)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let mut open = pdu::Open::new(ID::default(), "agentx-ifstack");
@@ -37,18 +37,26 @@ pub fn run(socket: &Path) -> Result<()> {
     register.header.session_id = opened.session_id;
     register.header.flags = opened.flags & NETWORK_ORDER;
     register.header.packet_id = 2;
-    register.priority = 127;
+    register.priority = config.priority;
     stream.write_all(&register.to_bytes()?)?;
     acknowledge(&mut stream, &register.header)?;
     stream.set_read_timeout(None)?;
-    eprintln!(
+    log::info!(
         "AgentX session {} registered ifStackTable",
         opened.session_id
     );
 
-    let mut cache = Cache(None);
+    let mut cache = Cache {
+        topology: None,
+        refresh: Duration::from_secs(config.refresh),
+    };
     loop {
         let (header, bytes) = receive(&mut stream)?;
+        log::debug!(
+            "AgentX request {:?}, packet {}",
+            header.ty,
+            header.packet_id
+        );
         if header.session_id != opened.session_id {
             let mut response = reply(&header);
             response.res_error = ResError::NotOpen;
@@ -69,7 +77,7 @@ pub fn run(socket: &Path) -> Result<()> {
         let (mut response, snmp_error) = match dispatch(&header, &bytes, &mut cache) {
             Ok(result) => result,
             Err(error) => {
-                eprintln!("AgentX request parse failed: {error}");
+                log::warn!("AgentX request parse failed: {error}");
                 let mut response = reply(&header);
                 response.res_error = ResError::ParseError;
                 (response, None)
@@ -134,7 +142,7 @@ fn dispatch(header: &Header, bytes: &[u8], cache: &mut Cache) -> Result<(Respons
                     });
                 }
                 Err(error) => {
-                    eprintln!("Interface refresh failed: {error}");
+                    log::error!("Interface refresh failed: {error}");
                     response.res_error = ResError::ProcessingError;
                 }
             }
@@ -232,14 +240,17 @@ fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
-struct Cache(Option<(Instant, Mib)>);
+struct Cache {
+    topology: Option<(Instant, Mib)>,
+    refresh: Duration,
+}
 
 impl Cache {
     fn get(&mut self) -> Result<&Mib> {
         if self
-            .0
+            .topology
             .as_ref()
-            .is_none_or(|(updated, _)| updated.elapsed() >= CACHE_MAX)
+            .is_none_or(|(updated, _)| updated.elapsed() >= self.refresh)
         {
             let output = Command::new("ip")
                 .args(["-details", "-json", "link", "show"])
@@ -254,10 +265,10 @@ impl Cache {
             let json = std::str::from_utf8(&output.stdout)
                 .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
             let mib = Mib::new(link::parse(json)?);
-            self.0 = Some((Instant::now(), mib));
+            self.topology = Some((Instant::now(), mib));
         }
         Ok(&self
-            .0
+            .topology
             .as_ref()
             .expect("cache populated after successful refresh")
             .1)

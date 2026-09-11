@@ -1,45 +1,163 @@
 # agentx-ifstack
 
 An AgentX (RFC 2741) subagent that serves IF-MIB `ifStackTable`
-(`1.3.6.1.2.1.31.1.2`) for Linux hosts, so SNMP monitoring systems can discover
-interface relationships.
+(`1.3.6.1.2.1.31.1.2`) for Linux hosts, so SNMP monitoring systems can discover interface relationships.
 
 The subagent serves GET, GETNEXT, and GETBULK requests. It refreshes the
 topology on demand after a five-second cache window. It reconnects and
 registers again when the master closes the session or the socket fails.
 
-## Run
+## Install and run
 
-Install `iproute2` and enable `master agentx` in `snmpd.conf`. Build and run:
+Packages support amd64 Linux hosts. Both formats contain a stripped musl static
+binary, so the executable does not require a particular glibc version.
+Download the package for your distribution from the project's GitHub Releases.
+
+On Debian 12 or 13:
+
+```bash
+sudo apt install ./agentx-ifstack_*_amd64.deb
+```
+
+On an RPM distribution with DNF:
+
+```bash
+sudo dnf install ./agentx-ifstack-*.x86_64.rpm
+```
+
+The packages depend on `iproute2` on Debian and `iproute` on RPM distributions.
+They install the service without enabling or starting it. Add this line to
+`/etc/snmp/snmpd.conf`:
+
+```text
+master agentx
+```
+
+Edit `/etc/agentx-ifstack.toml` if needed, then start the services:
+
+```bash
+sudo systemctl restart snmpd.service
+sudo systemctl enable --now agentx-ifstack.service
+systemctl status agentx-ifstack.service
+journalctl -u agentx-ifstack.service
+agentx-ifstack --version
+man agentx-ifstack
+```
+
+The service runs as root because `/var/agentx` is normally root-owned with mode
+0700. It has no capabilities and writes no files. Its systemd sandbox permits
+Unix and netlink sockets and execution of `ip` in the host network namespace.
+The unit orders itself after `snmpd.service` without pulling that service in.
+A missing master causes connection retries, not startup failure.
+
+On Debian, `sudo apt remove agentx-ifstack` preserves the configuration;
+`sudo apt purge agentx-ifstack` removes it. On RPM distributions,
+`sudo dnf remove agentx-ifstack` removes the package. RPM saves a modified
+configuration as `/etc/agentx-ifstack.toml.rpmsave` on removal.
+Both package formats preserve local configuration edits during upgrades.
+An upgrade restarts the service only if it is already running.
+
+## Configuration
+
+The default file is `/etc/agentx-ifstack.toml`. It accepts exactly four keys:
+
+```toml
+socket = "/var/agentx/master"
+refresh = 5
+priority = 127
+log_level = "info"
+```
+
+- `socket` is a nonempty AgentX Unix socket path.
+- `refresh` is an integer cache interval in seconds, at least 1.
+- `priority` is an integer from 1 to 255. Lower registration priorities win.
+- `log_level` is `error`, `warn`, `info`, `debug`, or `trace`.
+
+Omitted keys use built-in defaults. An absent default file is allowed.
+`--config PATH` selects another file and requires that file to exist, even if
+PATH names the default location. Invalid TOML, unknown keys, invalid values,
+and unreadable files cause an error before any connection attempt.
+
+File values override built-in defaults. `--socket PATH` overrides the file's
+socket value. `RUST_LOG` overrides the log filter. Fatal startup errors go directly
+to stderr even when `RUST_LOG=off`. Logs go to stderr without
+timestamps; journald supplies timestamps for the service. A healthy idle daemon
+is quiet at `info`. Restart the process after configuration changes.
+
+```bash
+sudo agentx-ifstack --config /etc/agentx-ifstack.toml --socket /run/agentx/master
+agentx-ifstack --help
+```
+
+The process uses one thread. It runs `ip -details -json link show` in the
+current network namespace. Refresh is demand driven: the first read after the
+cache expires loads topology again. Failed commands and invalid topology data
+return an AgentX processing error. The next read retries the refresh.
+Reconnect delays start at one second and double to a maximum of 30 seconds.
+A session that lasts at least 30 seconds resets the delay.
+
+## Build from source
+
+Install Rust using the toolchain pinned in `rust-toolchain.toml`, then:
 
 ```bash
 cargo build --release
 sudo ./target/release/agentx-ifstack
 ```
 
-The default socket is `/var/agentx/master`. Use `--socket PATH` to select
-another Unix socket. Logs go to stderr. Reconnect delays start at one second
-and double to a maximum of 30 seconds. A session that lasts at least 30
-seconds resets the delay.
+For both packages, install `musl-tools`, `binutils`, and `gzip` on a Debian
+build host, then:
 
-The process uses one thread. It runs `ip -details -json link show` in the
-current network namespace. Failed commands and invalid topology data return
-an AgentX processing error. The next request retries the refresh.
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo install --locked --version 3.8.0 cargo-deb
+cargo install --locked --version 0.21.0 cargo-generate-rpm
+sh packaging/build.sh
+```
 
-## Why this exists
+The build script writes `.deb` and `.rpm` files to `dist/`. It compresses the
+handwritten man page and checks that the binary is static, stripped, and free
+of build-directory paths. The Cargo metadata defines the installed assets.
+The systemd unit installs under `/usr/lib/systemd/system`; `/lib/systemd/system`
+resolves to the same location on the supported Debian releases.
+The Debian maintainer contact is a placeholder until a public contact is set.
 
-net-snmp implements neither `ifStackTable` nor `IEEE8023-LAG-MIB`. This is
-source-checked, not assumed: `agent/mibgroup/if-mib/` holds only `data_access`,
-`ifTable` and `ifXTable`, and nothing under `agent/mibgroup` matches
-ifStack/lag/dot3ad. Live walks agree, both return `No Such Object`. There is no
-option to enable; the code does not exist.
+## Package validation
 
-A Linux host therefore exposes no stack rows for its bonds, bridges or VLANs.
-Only this first hop is missing.
+CI runs formatting, strict Clippy, tests, and a musl package build on branch pushes
+and pull requests. It installs the packages in Debian 12, Debian 13, and Fedora
+containers. Checks cover the executable, unit, man page, licenses, configuration
+registration, local edits across reinstall, and removal. Debian also checks
+configuration preservation on remove and deletion on purge. Tag releases require
+the shared formatting, Clippy, test, and package workflows before publishing.
+Only the release workflow handles tag pushes, so each tag builds packages once.
+
+To run the container checks after building packages:
+
+```bash
+docker run --rm -v "$PWD:/work:ro" debian:12 sh -c 'sh /work/packaging/test-deb.sh /work/dist/*.deb'
+docker run --rm -v "$PWD:/work:ro" debian:13 sh -c 'sh /work/packaging/test-deb.sh /work/dist/*.deb'
+docker run --rm -v "$PWD:/work:ro" fedora:latest sh -c 'sh /work/packaging/test-rpm.sh /work/dist/*.rpm'
+```
+
+Lintian runs with errors and warnings treated as failures. The package documents
+two exceptions: `initial-upload-closes-no-bugs`, because this upstream package
+has no Debian intent-to-package bug, and `shared-library-lacks-prerequisites`,
+because the musl static PIE requires no shared libraries. The Apache license
+reference uses Debian's common-license path; both full licenses also ship.
+RPM linting permits `statically-linked-binary` for the musl executable and
+`no-signature` for unsigned GitHub Release artifacts. The spelling filter accepts
+`subagent`, the term used by RFC 2741. The `no-buildhost-tag` filter permits
+reproducible builds to omit the build hostname. The `no-changelogname-tag` filter
+permits this upstream binary package to use Cargo metadata; its packaging
+changelog ships as the Debian changelog. Other RPM findings remain
+visible in CI. RPM contents and installation are checked by the Fedora job.
+The container checks use offline systemd inspection and do not exercise a live
+systemd service manager.
 
 ## Table behaviour
 
-Register the region `1.3.6.1.2.1.31.1.2` at priority 127 in the default
+Register the region `1.3.6.1.2.1.31.1.2` at the configured priority (default 127) in the default
 context. Serve `ifStackStatus` as INTEGER 1. TestSet returns
 `notWritable(17)` at the first binding. CleanupSet requires no response.
 
@@ -120,11 +238,16 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+`python3 packaging/test_policy.py` checks the release gate, push triggers, and
+service restart policy. It requires PyYAML 6.0.3. The shared checks workflow runs it.
+
 `tests/session.rs` runs the actual binary against a UnixListener. The master
 uses real AgentX PDUs. A fixture executable supplies `ip` output without
 changing host interfaces. Tests cover both byte orders, reads, bulk walks,
 write rejection, cache refresh, errors, Close, and reconnect after socket
-loss. Raw wire tests cover oversized OIDs at both SearchRange ends and in
+loss. Configuration tests use real temporary files. Wire tests prove that the
+configured socket, priority, and refresh interval take effect and that the CLI
+socket overrides the file. Raw wire tests cover oversized OIDs at both SearchRange ends and in
 TestSet names and OID values. They check `parseError`, process survival, and
 a normal GET on the same connection. Pure tests cover topology fixtures and
 OID boundaries.

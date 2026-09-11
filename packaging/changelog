@@ -1,0 +1,5 @@
+agentx-ifstack (0.1.0-1) unstable; urgency=medium
+
+  * Package the AgentX ifStackTable subagent for Linux.
+
+ -- Marcin Zieba <marcinpsk@gmail.com>  Fri, 11 Sep 2026 00:00:00 +0000
