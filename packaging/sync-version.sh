@@ -6,6 +6,7 @@ set -eu
 
 python3 - <<'PY'
 """Carry the version semantic-release just wrote into the Debian changelog."""
+import datetime
 import email.utils
 import os
 import pathlib
@@ -58,7 +59,11 @@ existing = changelog.read_text()
 if not re.match(rf"^agentx-ifstack \({re.escape(version)}-\d+\) ", existing):
     # Honour SOURCE_DATE_EPOCH so a rebuild of the same release is reproducible.
     stamp = int(os.environ.get("SOURCE_DATE_EPOCH", time.time()))
-    released = email.utils.formatdate(stamp, usegmt=True)
+    # A Debian trailer needs a numeric offset. usegmt writes "GMT", which dpkg and
+    # lintian both reject as a badly formatted trailer line.
+    released = email.utils.format_datetime(
+        datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc)
+    )
     entry = (
         f"agentx-ifstack ({version}-1) unstable; urgency=medium\n"
         f"\n"

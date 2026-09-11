@@ -178,6 +178,40 @@ class PackagingPolicyTests(unittest.TestCase):
             self.assertIn(f"agentx-ifstack ({manifest_version()}-1) ",
                           (work / "packaging/changelog").read_text())
 
+    def test_the_generated_changelog_trailer_parses(self):
+        """Debian trailers need a numeric timezone offset, and lintian fails on a warning.
+
+        Parse the generated file with dpkg itself rather than a regex: the hand written
+        stanza was valid, so nothing caught the generator until the first real release.
+        """
+        parser = shutil.which("dpkg-parsechangelog")
+        if parser is None:
+            self.skipTest("dpkg-parsechangelog is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
+                shutil.copy(ROOT / name, work / name)
+            shutil.copytree(ROOT / "src", work / "src")
+            (work / "packaging").mkdir()
+            for name in ("changelog", "sync-version.sh"):
+                shutil.copy(ROOT / "packaging" / name, work / "packaging" / name)
+            manifest = (work / "Cargo.toml").read_text()
+            (work / "Cargo.toml").write_text(
+                manifest.replace(f'version = "{manifest_version()}"', 'version = "9.9.9"', 1)
+            )
+            subprocess.run(
+                ["sh", "packaging/sync-version.sh"], cwd=work, check=True,
+                capture_output=True, text=True,
+            )
+            parsed = subprocess.run(
+                [parser, "-l", str(work / "packaging/changelog")],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(
+                parsed.stderr.strip(), "", "dpkg rejected the generated changelog"
+            )
+            self.assertIn("Version: 9.9.9-1", parsed.stdout)
+
     def test_the_sync_script_finishes_a_half_applied_run(self):
         """A retry after a crash between the two writes must still fix Cargo.lock."""
         bumped = "9.9.9"
