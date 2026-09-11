@@ -84,8 +84,13 @@ JSON over `/sys/class/net` traversal.
 | `ifindex` | the interface's own ifIndex |
 | `master` | bond or bridge membership, names the higher sub-layer |
 | `linkinfo.info_kind` | interface kind, distinguishes stack layers from peers |
-| `link` | lower interface name for `vlan`, `macvlan`, `ipvlan`, `macvtap`, and `vxlan` |
+| `link` | lower interface name for `vlan`, `macvlan`, `ipvlan`, and `macvtap` |
 | `link_index` | lower interface index when emitted in numeric form |
+| `linkinfo.info_data.link` | lower interface for `vxlan`, as a name or an index |
+
+A vxlan does not use `link` or `link_index`. Its underlay is `IFLA_VXLAN_LINK`,
+which `ip` prints inside `linkinfo.info_data`. A vxlan with no underlay is a
+standalone interface, not an error.
 
 Reject lower-interface references with `link_netnsid`: remote ifIndexes are
 not local interface identifiers. Exclude veth peer links from stack rows.

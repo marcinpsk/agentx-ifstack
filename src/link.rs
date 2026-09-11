@@ -17,6 +17,20 @@ struct Link {
 #[derive(Deserialize)]
 struct LinkInfo {
     info_kind: Option<String>,
+    info_data: Option<InfoData>,
+}
+
+#[derive(Deserialize)]
+struct InfoData {
+    link: Option<Underlay>,
+}
+
+/// iproute2 prints the vxlan underlay as a name, and as an index when it cannot resolve one.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Underlay {
+    Name(String),
+    Index(u32),
 }
 
 impl Link {
@@ -49,10 +63,15 @@ pub fn parse(input: &str) -> Result<Vec<(u32, u32)>> {
                 rows.insert((higher.ifindex, link.ifindex));
             }
         }
-        if matches!(
-            link.kind(),
-            Some("vlan" | "macvlan" | "ipvlan" | "macvtap" | "vxlan")
-        ) {
+        if link.kind() == Some("vxlan") {
+            // A vxlan reports its underlay in linkinfo.info_data, never in link or link_index.
+            if let Some(lower) = vxlan_lower(link, &names)? {
+                if !indices.contains(&lower) {
+                    return Err(invalid("unknown lower interface index"));
+                }
+                rows.insert((link.ifindex, lower));
+            }
+        } else if matches!(link.kind(), Some("vlan" | "macvlan" | "ipvlan" | "macvtap")) {
             if link.link_netnsid.is_some() {
                 return Err(invalid("lower interface is in another network namespace"));
             }
@@ -95,6 +114,24 @@ pub fn parse(input: &str) -> Result<Vec<(u32, u32)>> {
     Ok(rows.into_iter().collect())
 }
 
+fn vxlan_lower(link: &Link, names: &BTreeMap<&str, &Link>) -> Result<Option<u32>> {
+    let Some(underlay) = link
+        .linkinfo
+        .as_ref()
+        .and_then(|info| info.info_data.as_ref())
+        .and_then(|data| data.link.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(match underlay {
+        Underlay::Name(name) => names
+            .get(name.as_str())
+            .map(|lower| lower.ifindex)
+            .ok_or_else(|| invalid("unknown lower interface name"))?,
+        Underlay::Index(index) => *index,
+    }))
+}
+
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
 }
@@ -129,7 +166,7 @@ mod tests {
 
     #[test]
     fn lower_interface_kinds_are_stack_layers_but_veth_peers_are_not() {
-        for kind in ["macvlan", "ipvlan", "macvtap", "vxlan"] {
+        for kind in ["macvlan", "ipvlan", "macvtap"] {
             for reference in [r#""link":"port2""#, r#""link_index":2"#] {
                 let input = format!(
                     r#"[
@@ -150,7 +187,7 @@ mod tests {
 
     #[test]
     fn lower_interface_kinds_reject_invalid_references() {
-        for kind in ["macvlan", "ipvlan", "macvtap", "vxlan"] {
+        for kind in ["macvlan", "ipvlan", "macvtap"] {
             for reference in [
                 r#""link_index":2,"link_netnsid":0"#,
                 r#""link":"missing""#,
@@ -356,5 +393,54 @@ mod tests {
             {"ifindex":2,"ifname":"port2","master":"port1","link_index":2,"link_netnsid":0,"linkinfo":{"info_kind":"veth"}}
         ]"#;
         assert_eq!(parse(input).unwrap(), [(0, 1), (0, 2), (1, 0), (2, 0)]);
+    }
+
+    // Real `ip -details -json link show` puts the vxlan underlay in linkinfo.info_data,
+    // never in the top-level link or link_index fields.
+    #[test]
+    fn a_vxlan_resolves_its_underlay_from_info_data() {
+        let rows = parse(include_str!("../tests/fixtures/vxlan.json")).unwrap();
+        let relationships: Vec<_> = rows
+            .iter()
+            .copied()
+            .filter(|&(higher, lower)| higher != 0 && lower != 0)
+            .collect();
+        assert_eq!(relationships, [(10, 2)]);
+    }
+
+    #[test]
+    fn a_vxlan_underlay_is_accepted_as_an_index() {
+        let rows = parse(
+            r#"[
+            {"ifindex":2,"ifname":"port2"},
+            {"ifindex":10,"ifname":"vx10","linkinfo":{"info_kind":"vxlan","info_data":{"link":2}}}
+        ]"#,
+        )
+        .unwrap();
+        assert_eq!(rows, [(0, 10), (2, 0), (10, 2)]);
+    }
+
+    #[test]
+    fn a_vxlan_without_an_underlay_is_standalone() {
+        let rows = parse(
+            r#"[
+            {"ifindex":10,"ifname":"vx10","linkinfo":{"info_kind":"vxlan","info_data":{"id":43}}}
+        ]"#,
+        )
+        .unwrap();
+        assert_eq!(rows, [(0, 10), (10, 0)]);
+    }
+
+    #[test]
+    fn a_vxlan_rejects_an_unknown_underlay() {
+        for underlay in [r#""link":"missing""#, r#""link":99"#] {
+            let input = format!(
+                r#"[
+                {{"ifindex":2,"ifname":"port2"}},
+                {{"ifindex":10,"ifname":"vx10","linkinfo":{{"info_kind":"vxlan","info_data":{{{underlay}}}}}}}
+            ]"#
+            );
+            assert!(parse(&input).is_err(), "accepted {underlay}");
+        }
     }
 }
