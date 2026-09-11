@@ -68,9 +68,8 @@ class PackagingPolicyTests(unittest.TestCase):
         release_push = workflow("release.yml")["on"]["push"]
         self.assertEqual(release_push.get("branches"), ["main"])
         self.assertNotIn("tags", release_push)
-        ci_push = workflow("ci.yml")["on"]["push"]
-        self.assertEqual(ci_push.get("branches"), ["**"])
-        self.assertNotIn("tags", ci_push)
+        # CI runs on pull requests only, so it has no push trigger to carry a tag.
+        self.assertNotIn("push", workflow("ci.yml")["on"])
 
     def test_the_release_job_waits_for_the_shared_checks(self):
         """A red test gate must stop the release before it tags and publishes."""
@@ -292,6 +291,28 @@ class PackagingPolicyTests(unittest.TestCase):
                 if not PINNED_ACTION.match(reference):
                     unpinned.append(f"{path.name} {reference}")
         self.assertEqual(unpinned, [], "third-party actions must be pinned to a SHA")
+
+    def test_no_workflow_runs_twice_for_one_push(self):
+        """push on every branch plus pull_request runs every job twice on a PR branch.
+
+        pull_request builds the merge commit, which is the result that matters for a
+        pull request, so push stays on main for post-merge validation.
+        """
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = yaml.safe_load(path.read_text())
+            # PyYAML follows YAML 1.1, where a bare `on:` key parses as the boolean True.
+            triggers = workflow.get("on", workflow.get(True))
+            if not isinstance(triggers, dict) or "pull_request" not in triggers:
+                continue
+            push = triggers.get("push")
+            if push is None:
+                continue
+            self.assertEqual(
+                push.get("branches"),
+                ["main"],
+                f"{path.name}: push and pull_request both fire on a PR branch, "
+                "so every job runs twice; limit push to main",
+            )
 
     def test_no_workflow_checkout_persists_its_credential(self):
         """actions/checkout leaves the token in .git/config, where any later step reads it."""
