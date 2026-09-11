@@ -1,5 +1,6 @@
 """Check the release gate and the service restart policy."""
 
+import ast
 import configparser
 import re
 import shutil
@@ -260,6 +261,36 @@ class PackagingPolicyTests(unittest.TestCase):
                     "trap", text, f"{path.name} must clean up its temporary directory"
                 )
         self.assertEqual(offenders, [], "use mktemp -d instead of predictable paths")
+
+    def test_the_sync_script_makes_each_replacement_durable(self):
+        """A file fsync leaves the new directory entry unflushed, so a crash can undo it.
+
+        Ordering is the property that matters, so read the syntax tree rather than the
+        text: the directory fsync has to follow os.replace, not merely appear somewhere.
+        """
+        script = (ROOT / "packaging/sync-version.sh").read_text()
+        embedded = re.search(r"python3 - <<'PY'\n(.*?)\nPY\n", script, re.DOTALL)
+        self.assertIsNotNone(embedded, "the sync script must embed a python3 heredoc")
+        tree = ast.parse(embedded.group(1))
+        replace = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "replace"
+        ]
+        self.assertEqual(len(replace), 1, "expected exactly one os.replace")
+        fsync_lines = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "fsync"
+        ]
+        self.assertTrue(
+            any(line > replace[0].lineno for line in fsync_lines),
+            "fsync the parent directory after os.replace, or a crash can revert it",
+        )
 
 
 if __name__ == "__main__":

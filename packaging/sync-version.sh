@@ -30,6 +30,12 @@ def write_if_changed(path, content):
             new.flush()
             os.fsync(new.fileno())
         os.replace(temporary, path)
+        # A file fsync does not flush the new directory entry, so sync the parent too.
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     except BaseException:
         pathlib.Path(temporary).unlink(missing_ok=True)
         raise
