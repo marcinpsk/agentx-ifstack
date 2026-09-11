@@ -45,7 +45,12 @@ cargo test <test_name>          # single test
 cargo test -- --nocapture       # keep test stdout
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
+cargo deny check                # advisories, licences, banned and duplicate crates
 ```
+
+Lint levels live in `Cargo.toml` under `[lints]`, so a plain `cargo clippy` fails on the
+same code CI rejects. `cargo deny` needs `cargo install --locked cargo-deny`; CI runs it
+as a separate job in `checks.yml`.
 
 `rust-toolchain.toml` pins the toolchain, but a `RUSTUP_TOOLCHAIN` environment variable
 overrides it. Check that variable before blaming a build failure on the code.

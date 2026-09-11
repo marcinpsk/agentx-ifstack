@@ -9,6 +9,14 @@ readme = "README.md"
 keywords = ["snmp", "agentx", "if-mib", "ifstacktable", "linux"]
 categories = ["network-programming", "command-line-utilities"]
 
+# Lint levels belong here, not only in the CI flag, so a local cargo clippy and CI
+# reject the same code.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
 [dependencies]
 agentx = "0.1.1"
 serde = { version = "1", features = ["derive"] }

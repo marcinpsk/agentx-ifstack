@@ -116,6 +116,36 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertIs(release["major_on_zero"], False)
         self.assertIs(release["allow_zero_version"], True)
 
+    def test_the_release_uploads_both_package_formats(self):
+        """`version` builds dist/ and creates the release but uploads nothing from it.
+
+        Only `publish` uploads dist_glob_patterns, so a release that runs `version`
+        alone ships a tag with no packages attached.
+        """
+        config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        publish = config["tool"]["semantic_release"]["publish"]
+        self.assertIs(publish["upload_to_vcs_release"], True)
+        globs = publish["dist_glob_patterns"]
+        for suffix in (".deb", ".rpm"):
+            self.assertTrue(
+                any(glob.endswith(suffix) for glob in globs),
+                f"no dist glob matches {suffix}: {globs}",
+            )
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        steps = workflow["jobs"]["semantic-release"]["steps"]
+        commands = "\n".join(str(step.get("run", "")) for step in steps)
+        self.assertIn(
+            "semantic-release version", commands, "the release must compute a version"
+        )
+        self.assertIn(
+            "semantic-release publish",
+            commands,
+            "run semantic-release publish, or the packages never reach the release",
+        )
+        # publish defaults to the latest release, which would attach this run's packages
+        # to the previous tag when nothing was bumped.
+        self.assertIn("--tag", commands, "publish must name the tag it uploads to")
+
     def test_the_sync_script_carries_a_bump_into_every_version_source(self):
         """Run the real script on a real copy: a stub would not catch cargo drift."""
         bumped = "9.9.9"

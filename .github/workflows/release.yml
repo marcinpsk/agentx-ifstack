@@ -92,7 +92,27 @@ jobs:
           cargo install --locked --version 3.8.0 cargo-deb
           cargo install --locked --version 0.21.0 cargo-generate-rpm
           uv sync --group dev
+      # `version` builds dist/ through build_command and creates the release, but it
+      # never uploads dist_glob_patterns. Only `publish` does that. Publish the exact new
+      # tag, because `publish` otherwise defaults to "latest" and would attach the
+      # packages to the previous release when this run bumped nothing.
       - name: Run semantic-release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: uv run semantic-release version --changelog --push --vcs-release
+        run: |
+          before=$(git describe --tags --abbrev=0 2>/dev/null || echo none)
+          uv run semantic-release version --changelog --push --vcs-release
+          after=$(git describe --tags --abbrev=0 2>/dev/null || echo none)
+          if [ "$after" = "$before" ]; then
+            echo "No new tag, so there is nothing to publish."
+            exit 0
+          fi
+          test -n "$(find dist -name '*.deb' -print -quit)" || {
+            echo "dist holds no .deb, refusing to publish an incomplete release" >&2
+            exit 1
+          }
+          test -n "$(find dist -name '*.rpm' -print -quit)" || {
+            echo "dist holds no .rpm, refusing to publish an incomplete release" >&2
+            exit 1
+          }
+          uv run semantic-release publish --tag "$after"
