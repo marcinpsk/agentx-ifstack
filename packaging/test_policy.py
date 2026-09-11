@@ -107,6 +107,13 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertIn("sync-version.sh", chain, "the build command must sync versions")
         self.assertIn("build.sh", chain, "the build command must build the packages")
         self.assertEqual(sorted(release["assets"]), ["Cargo.lock", "packaging/changelog"])
+        # Squash merges put the real commit subjects in the body. Without this a squashed
+        # feat: is invisible and the release silently under-bumps to a patch.
+        parser = release["commit_parser_options"]
+        self.assertIs(parser["parse_squash_commits"], True)
+        # A feat: on a 0.x version must not jump to 1.0.0 while the wire format settles.
+        self.assertIs(release["major_on_zero"], False)
+        self.assertIs(release["allow_zero_version"], True)
 
     def test_the_sync_script_carries_a_bump_into_every_version_source(self):
         """Run the real script on a real copy: a stub would not catch cargo drift."""
