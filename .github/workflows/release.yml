@@ -1,51 +1,93 @@
 name: Release
 
-on:
+"on":
   push:
-    tags: ['v*']
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 jobs:
+  # The release must not publish while the test gate is red.
   check:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/checks.yml
 
-  version:
+  # build_command runs only during a release, so a broken one would surface on main
+  # with the release already half done. Run it here against the version a release
+  # would write, without committing, tagging or publishing anything.
+  build-command:
+    name: Release build command
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # The build command comes from the pull request, so hand this job no write
+    # access and no checkout credential.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - name: Check tag against package version
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
+      - name: Fetch tags
+        run: git fetch --tags --force
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Install the packaging toolchain
         run: |
-          python3 - <<'PY'
-          import os
-          import tomllib
-          with open('Cargo.toml', 'rb') as manifest:
-              version = tomllib.load(manifest)['package']['version']
-          assert os.environ['RELEASE_TAG'] == f'v{version}', 'Tag must match Cargo.toml'
-          PY
+          sudo apt-get update
+          sudo apt-get install -y musl-tools man-db
+          rustup target add x86_64-unknown-linux-musl
+          cargo install --locked --version 3.8.0 cargo-deb
+          cargo install --locked --version 0.21.0 cargo-generate-rpm
+          uv sync --group dev
+      # semantic-release releases from main only, so give the pull request that name.
+      # --patch forces a bump so the build command runs whatever the commits say.
+      - name: Run the release build without publishing
+        run: |
+          git checkout -B main
+          uv run semantic-release version --patch --no-commit --no-tag --no-push --no-vcs-release
 
-  packages:
-    needs: version
-    uses: ./.github/workflows/packages.yml
-
-  publish:
-    needs: [check, packages]
+  semantic-release:
+    name: Semantic Release
+    needs: check
+    # The release commit is pushed with a token, which starts this workflow again.
+    if: >-
+      github.event_name == 'push'
+      && !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
+    # Two merges close together must not race two releases onto the same tag.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: packages
-          path: dist
-      - name: Attach packages to GitHub Release
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
+      # actions/checkout fetches with --no-tags, so annotated tag objects can be
+      # missing even with fetch-tags. Re-fetch so semantic-release can dereference
+      # them. See https://github.com/actions/checkout/issues/2309
+      - name: Fetch tags
+        run: git fetch --tags --force
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+      - name: Install the packaging toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools man-db
+          rustup target add x86_64-unknown-linux-musl
+          cargo install --locked --version 3.8.0 cargo-deb
+          cargo install --locked --version 0.21.0 cargo-generate-rpm
+          uv sync --group dev
+      - name: Run semantic-release
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" dist/*.deb dist/*.rpm --verify-tag --generate-notes
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: uv run semantic-release version --changelog --push --vcs-release
