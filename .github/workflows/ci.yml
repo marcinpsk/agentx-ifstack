@@ -1,8 +1,9 @@
 name: CI
 
+# Pull requests only. push and pull_request both fired for one push to a PR branch, so
+# every job ran twice. The main ruleset requires a pull request, so nothing reaches main
+# without this running first, and pull_request builds the merge commit that lands.
 on:
-  push:
-    branches: ['**']
   pull_request:
 
 permissions:

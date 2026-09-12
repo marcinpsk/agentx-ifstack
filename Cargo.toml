@@ -9,6 +9,17 @@ readme = "README.md"
 keywords = ["snmp", "agentx", "if-mib", "ifstacktable", "linux"]
 categories = ["network-programming", "command-line-utilities"]
 
+# Lint levels belong here, not only in the CI flag, so a local cargo clippy and CI
+# reject the same code.
+[lints.rust]
+# The CI flag is -D warnings, which denies rustc warnings as well as clippy lints.
+# Without this group a dead_code warning passes a plain cargo clippy and fails CI.
+warnings = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+
 [dependencies]
 agentx = "0.1.1"
 serde = { version = "1", features = ["derive"] }

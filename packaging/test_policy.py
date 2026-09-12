@@ -68,9 +68,8 @@ class PackagingPolicyTests(unittest.TestCase):
         release_push = workflow("release.yml")["on"]["push"]
         self.assertEqual(release_push.get("branches"), ["main"])
         self.assertNotIn("tags", release_push)
-        ci_push = workflow("ci.yml")["on"]["push"]
-        self.assertEqual(ci_push.get("branches"), ["**"])
-        self.assertNotIn("tags", ci_push)
+        # CI runs on pull requests only, so it has no push trigger to carry a tag.
+        self.assertNotIn("push", workflow("ci.yml")["on"])
 
     def test_the_release_job_waits_for_the_shared_checks(self):
         """A red test gate must stop the release before it tags and publishes."""
@@ -116,6 +115,86 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertIs(release["major_on_zero"], False)
         self.assertIs(release["allow_zero_version"], True)
 
+    def test_the_release_uploads_both_package_formats(self):
+        """`version` builds dist/ and creates the release but uploads nothing from it.
+
+        Only `publish` uploads dist_glob_patterns, so a release that runs `version`
+        alone ships a tag with no packages attached.
+        """
+        config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        publish = config["tool"]["semantic_release"]["publish"]
+        self.assertIs(publish["upload_to_vcs_release"], True)
+        globs = publish["dist_glob_patterns"]
+        # build.sh writes into dist/, so a glob elsewhere uploads nothing.
+        for suffix in (".deb", ".rpm"):
+            self.assertTrue(
+                any(
+                    glob.startswith("dist/") and glob.endswith(suffix)
+                    for glob in globs
+                ),
+                f"no dist/ glob matches {suffix}: {globs}",
+            )
+        workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
+        steps = workflow["jobs"]["semantic-release"]["steps"]
+        commands = "\n".join(str(step.get("run", "")) for step in steps)
+        self.assertIn(
+            "semantic-release version", commands, "the release must compute a version"
+        )
+        self.assertIn(
+            "semantic-release publish",
+            commands,
+            "run semantic-release publish, or the packages never reach the release",
+        )
+        # publish defaults to the latest release, which would attach this run's packages
+        # to the previous tag when nothing was bumped. Pin the whole command: a stale
+        # literal or an unrelated variable would satisfy a bare "--tag" check.
+        self.assertIn(
+            'semantic-release publish --tag "$after"',
+            commands,
+            "publish must upload to the tag this run created",
+        )
+
+    def test_the_build_command_refuses_an_incomplete_package_set(self):
+        """build_command runs before the tag, so a missing format must stop the release.
+
+        Checking after `semantic-release version` is too late: it has already committed,
+        tagged, pushed and created the release by then. Run the real script against a
+        stubbed build so the guard itself is exercised.
+        """
+        def run(files, directories=()):
+            with tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+                (work / "packaging").mkdir()
+                shutil.copy(
+                    ROOT / "packaging/release-build.sh", work / "packaging/release-build.sh"
+                )
+                (work / "packaging/sync-version.sh").write_text("#!/bin/sh\n")
+                (work / "packaging/build.sh").write_text(
+                    "#!/bin/sh\nset -eu\nmkdir -p dist\n"
+                    + "".join(f"touch dist/pkg{suffix}\n" for suffix in files)
+                    + "".join(f"mkdir -p dist/pkg{suffix}\n" for suffix in directories)
+                )
+                return subprocess.run(
+                    ["sh", "packaging/release-build.sh"], cwd=work,
+                    capture_output=True, text=True, check=False,
+                )
+
+        self.assertEqual(run([".deb", ".rpm"]).returncode, 0, "a complete set must build")
+        for files, missing in (([".deb"], ".rpm"), ([".rpm"], ".deb"), ([], "both")):
+            self.assertNotEqual(
+                run(files).returncode, 0,
+                f"the build command accepted a package set missing {missing}",
+            )
+        # A directory carrying the suffix is not a package.
+        for files, directories, shape in (
+            ([".rpm"], [".deb"], "a directory named *.deb"),
+            ([".deb"], [".rpm"], "a directory named *.rpm"),
+        ):
+            self.assertNotEqual(
+                run(files, directories).returncode, 0,
+                f"the build command accepted {shape}",
+            )
+
     def test_the_sync_script_carries_a_bump_into_every_version_source(self):
         """Run the real script on a real copy: a stub would not catch cargo drift."""
         bumped = "9.9.9"
@@ -147,6 +226,40 @@ class PackagingPolicyTests(unittest.TestCase):
             # The previous stanza must survive so the package keeps its history.
             self.assertIn(f"agentx-ifstack ({manifest_version()}-1) ",
                           (work / "packaging/changelog").read_text())
+
+    def test_the_generated_changelog_trailer_parses(self):
+        """Debian trailers need a numeric timezone offset, and lintian fails on a warning.
+
+        Parse the generated file with dpkg itself rather than a regex: the hand written
+        stanza was valid, so nothing caught the generator until the first real release.
+        """
+        parser = shutil.which("dpkg-parsechangelog")
+        if parser is None:
+            self.skipTest("dpkg-parsechangelog is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            for name in ("Cargo.toml", "Cargo.lock", "rust-toolchain.toml"):
+                shutil.copy(ROOT / name, work / name)
+            shutil.copytree(ROOT / "src", work / "src")
+            (work / "packaging").mkdir()
+            for name in ("changelog", "sync-version.sh"):
+                shutil.copy(ROOT / "packaging" / name, work / "packaging" / name)
+            manifest = (work / "Cargo.toml").read_text()
+            (work / "Cargo.toml").write_text(
+                manifest.replace(f'version = "{manifest_version()}"', 'version = "9.9.9"', 1)
+            )
+            subprocess.run(
+                ["sh", "packaging/sync-version.sh"], cwd=work, check=True,
+                capture_output=True, text=True,
+            )
+            parsed = subprocess.run(
+                [parser, "-l", str(work / "packaging/changelog")],
+                capture_output=True, text=True, check=True,
+            )
+            self.assertEqual(
+                parsed.stderr.strip(), "", "dpkg rejected the generated changelog"
+            )
+            self.assertIn("Version: 9.9.9-1", parsed.stdout)
 
     def test_the_sync_script_finishes_a_half_applied_run(self):
         """A retry after a crash between the two writes must still fix Cargo.lock."""
@@ -229,6 +342,43 @@ class PackagingPolicyTests(unittest.TestCase):
                     unpinned.append(f"{path.name} {reference}")
         self.assertEqual(unpinned, [], "third-party actions must be pinned to a SHA")
 
+    def test_no_workflow_runs_twice_for_one_push(self):
+        """push on every branch plus pull_request runs every job twice on a PR branch.
+
+        pull_request builds the merge commit, which is the result that matters for a
+        pull request, so push stays on main for post-merge validation.
+        """
+        for path in sorted(workflow_paths()):
+            workflow = yaml.safe_load(path.read_text())
+            # PyYAML follows YAML 1.1, where a bare `on:` key parses as the boolean True.
+            triggers = workflow.get("on", workflow.get(True))
+            # GitHub Actions also accepts `on: [push, pull_request]`.
+            if isinstance(triggers, list):
+                self.assertFalse(
+                    "push" in triggers and "pull_request" in triggers,
+                    f"{path.name}: push and pull_request both fire on a PR branch, "
+                    "so every job runs twice; limit push to main",
+                )
+                continue
+            if not isinstance(triggers, dict) or "pull_request" not in triggers:
+                continue
+            if "push" not in triggers:
+                continue
+            push = triggers["push"]
+            # GitHub Actions allows an event with no configuration, which PyYAML loads
+            # as None. A bare `push:` fires on every branch.
+            self.assertIsNotNone(
+                push,
+                f"{path.name}: a bare push trigger fires on every branch, so every job "
+                "runs twice on a PR branch; limit push to main",
+            )
+            self.assertEqual(
+                push.get("branches"),
+                ["main"],
+                f"{path.name}: push and pull_request both fire on a PR branch, "
+                "so every job runs twice; limit push to main",
+            )
+
     def test_no_workflow_checkout_persists_its_credential(self):
         """actions/checkout leaves the token in .git/config, where any later step reads it."""
         persisting = []
@@ -243,6 +393,40 @@ class PackagingPolicyTests(unittest.TestCase):
                     if (step.get("with") or {}).get("persist-credentials") != "false":
                         persisting.append(f"{path.name}:{job_name}")
         self.assertEqual(persisting, [], "checkout must not persist credentials")
+
+    def test_the_custom_ruleset_adds_to_coderabbit_instead_of_replacing_it(self):
+        """CodeRabbit runs a detected opengrep config INSTEAD OF its default packs.
+
+        A file named opengrep.yml or semgrep.yml would silently replace that coverage,
+        so the ruleset carries a name CodeRabbit does not adopt and is passed with
+        --config instead.
+        """
+        for name in (
+            ".semgrep.yaml", ".semgrep.yml", "semgrep.yaml", "semgrep.yml",
+            ".opengrep.yaml", ".opengrep.yml", "opengrep.yaml", "opengrep.yml",
+        ):
+            self.assertFalse(
+                (ROOT / name).exists(),
+                f"{name} would replace CodeRabbit's own opengrep packs",
+            )
+        ruleset = ROOT / ".opengrep/agentx-ifstack-rules.yaml"
+        self.assertTrue(ruleset.exists(), "the custom ruleset is missing")
+
+        # Every rule needs a fixture, or it can silently stop matching.
+        rules = yaml.safe_load(ruleset.read_text())["rules"]
+        self.assertTrue(rules, "the ruleset declares no rules")
+        for rule in rules:
+            fixture = ROOT / ".opengrep/tests" / f"{rule['id']}.rs"
+            self.assertTrue(
+                fixture.exists(), f"rule {rule['id']} has no rule-test fixture"
+            )
+
+        steps = workflow("checks.yml")["jobs"]["rules"]["steps"]
+        commands = "\n".join(str(step.get("run", "")) for step in steps)
+        self.assertIn("opengrep-test.sh", commands, "CI must run the rule-tests")
+        self.assertIn("opengrep-scan.sh", commands, "CI must run the ruleset")
+        # The binary is fetched over the network, so pin it by digest.
+        self.assertIn("sha256sum -c -", commands, "pin the opengrep binary by checksum")
 
     def test_package_scripts_use_private_temporary_files(self):
         """A predictable temporary path lets a local user redirect a root-run write."""

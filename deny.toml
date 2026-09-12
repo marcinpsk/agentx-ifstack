@@ -1,0 +1,31 @@
+# Supply-chain gate for the dependency tree. Dependabot raises version bumps, but it
+# does not report whether the tree as locked carries a known advisory.
+
+[graph]
+# The release binary is built for musl, so resolve the tree that actually ships.
+targets = [{ triple = "x86_64-unknown-linux-musl" }]
+
+[advisories]
+version = 2
+# RUSTSEC advisories fail the build. Add an id here only with a comment saying why.
+ignore = []
+
+[licenses]
+version = 2
+# The package ships as a .deb and .rpm with a copyright file, so a copyleft crate
+# arriving through a transitive dependency is a packaging problem, not only a legal one.
+allow = [
+    "MIT",
+
+    "Apache-2.0",
+    "Unlicense",
+    "Unicode-3.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
