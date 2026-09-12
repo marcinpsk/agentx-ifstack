@@ -153,3 +153,21 @@ Every interface also yields the two zero-index boundary rows RFC 2863 requires.
 - net-snmp `local/snmp-bridge-mib`, Perl AgentX subagent reading `/sys/class/net`,
   BRIDGE-MIB only.
 - `snmp_rust_agent`, `sunt`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in this repo, driven through the `gh` CLI. External pull
+requests are treated as a request surface and triaged alongside issues. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. Neither exists yet, and the
+skills proceed silently rather than scaffolding them. See `docs/agents/domain.md`.
