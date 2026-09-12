@@ -362,9 +362,16 @@ class PackagingPolicyTests(unittest.TestCase):
                 continue
             if not isinstance(triggers, dict) or "pull_request" not in triggers:
                 continue
-            push = triggers.get("push")
-            if push is None:
+            if "push" not in triggers:
                 continue
+            push = triggers["push"]
+            # GitHub Actions allows an event with no configuration, which PyYAML loads
+            # as None. A bare `push:` fires on every branch.
+            self.assertIsNotNone(
+                push,
+                f"{path.name}: a bare push trigger fires on every branch, so every job "
+                "runs twice on a PR branch; limit push to main",
+            )
             self.assertEqual(
                 push.get("branches"),
                 ["main"],
