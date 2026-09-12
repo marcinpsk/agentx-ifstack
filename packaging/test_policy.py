@@ -531,6 +531,63 @@ class PackagingPolicyTests(unittest.TestCase):
             "zizmor must run without conditions and propagate failures",
         )
 
+    def test_the_documented_zizmor_command_matches_ci(self):
+        """A narrower local command passes while CI fails.
+
+        The documented command audited `.github/workflows/` while the action defaults to
+        the repo root, so `dependabot.yml` was never audited locally and its three
+        cooldown findings only appeared in CI.
+        """
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("zizmorcore/zizmor-action@")
+        )
+        options = step.get("with") or {}
+        # Defaults from the action's own action.yml at the pinned SHA.
+        expected_inputs = sorted(str(options.get("inputs", ".")).split())
+        expected_persona = str(options.get("persona", "regular"))
+
+        invocations = []
+        for name in ("CLAUDE.md", "README.md"):
+            for span in re.findall(r"`([^`]*zizmor[^`]*)`", (ROOT / name).read_text()):
+                words = shlex.split(span)
+                index = next(
+                    (
+                        position
+                        for position, word in enumerate(words)
+                        if word == "zizmor" or word.startswith("zizmor@")
+                    ),
+                    None,
+                )
+                if index is None or len(words) == 1:
+                    continue  # prose naming the tool, not a command
+                invocations.append((name, words, index))
+        self.assertTrue(invocations, "no documented zizmor command to check")
+
+        for name, words, index in invocations:
+            arguments = words[index + 1 :]
+            paths = sorted(word for word in arguments if not word.startswith("-"))
+            self.assertEqual(
+                paths,
+                expected_inputs,
+                f"{name}: the documented zizmor command audits {paths}, "
+                f"but the CI job audits {expected_inputs}",
+            )
+            persona = "regular"
+            for position, word in enumerate(arguments):
+                if word.startswith("--persona="):
+                    persona = word.split("=", 1)[1]
+                elif word == "--persona" and position + 1 < len(arguments):
+                    persona = arguments[position + 1]
+            self.assertEqual(
+                persona,
+                expected_persona,
+                f"{name}: the documented zizmor command uses persona {persona}, "
+                f"but the CI job uses {expected_persona}",
+            )
+
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.
 
@@ -764,7 +821,8 @@ class GuardRegressionTests(unittest.TestCase):
         self.root = Path(temporary.name)
         for name in (".github", ".opengrep", "src", "scripts", "docs"):
             shutil.copytree(ROOT / name, self.root / name)
-        shutil.copy2(ROOT / ".pre-commit-config.yaml", self.root)
+        for name in (".pre-commit-config.yaml", "CLAUDE.md", "README.md"):
+            shutil.copy2(ROOT / name, self.root)
         self.addCleanup(setattr, sys.modules[__name__], "ROOT", original_root)
         ROOT = self.root
         self.addCleanup(os.chdir, Path.cwd())
@@ -872,6 +930,40 @@ class GuardRegressionTests(unittest.TestCase):
                 self.mutate(".github/workflows/checks.yml", change)
                 with self.assertRaises(AssertionError):
                     self.policy.test_the_workflows_are_audited_by_zizmor()
+
+    def test_gh_json_guard_rejects_a_field_the_cli_lacks(self):
+        document = ROOT / "docs/agents/issue-tracker.md"
+        document.write_text(
+            document.read_text().replace(
+                "--json subIssues", "--json subIssues,authorAssociation"
+            )
+        )
+        with self.assertRaisesRegex(AssertionError, "authorAssociation"):
+            self.policy.test_documented_gh_json_fields_exist()
+
+    def test_zizmor_guard_rejects_a_documented_command_narrower_than_ci(self):
+        baseline = (ROOT / "CLAUDE.md").read_text()
+        for replacement, expected in (
+            ("uvx --native-tls zizmor .github/workflows/", "audits"),
+            ("uvx --native-tls zizmor --persona=pedantic .", "persona"),
+        ):
+            with self.subTest(replacement=replacement):
+                (ROOT / "CLAUDE.md").write_text(
+                    baseline.replace("uvx --native-tls zizmor .", replacement)
+                )
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_the_documented_zizmor_command_matches_ci()
+        (ROOT / "CLAUDE.md").write_text(baseline)
+
+        # The guard follows the job, so widening CI alone must also fail.
+        self.mutate(
+            ".github/workflows/checks.yml",
+            lambda data: data["jobs"]["zizmor"]["steps"][-1].update(
+                {"with": {"advanced-security": False, "inputs": ".github .opengrep"}}
+            ),
+        )
+        with self.assertRaisesRegex(AssertionError, "audits"):
+            self.policy.test_the_documented_zizmor_command_matches_ci()
 
     def test_external_pr_query_reads_later_pages(self):
         document = (ROOT / "docs/agents/issue-tracker.md").read_text()

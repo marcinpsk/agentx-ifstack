@@ -63,7 +63,9 @@ The hooks are filtered so a commit touching neither `src/` nor the rules costs n
 `.opengrep/README.md` for that and for why the filename matters.
 
 `zizmor` audits the workflows themselves (permissions, injection, unpinned actions) in the
-`Workflow audit` CI job. Run it locally with `uvx --native-tls zizmor .github/workflows/`.
+`Workflow audit` CI job. Run it locally with `uvx --native-tls zizmor .`, which is the
+scope the CI job audits: the repo root, so `dependabot.yml` is included, not only
+`.github/workflows/`. Export `GH_TOKEN` to add the online audits CI also runs.
 
 `rust-toolchain.toml` pins the toolchain, but a `RUSTUP_TOOLCHAIN` environment variable
 overrides it. Check that variable before blaming a build failure on the code.
