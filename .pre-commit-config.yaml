@@ -1,0 +1,27 @@
+# Local hooks only. The repository's other gates run in CI; this file exists so the
+# custom opengrep ruleset runs somewhere, because CodeRabbit skips its own opengrep pass
+# when it sees opengrep in the workflows. See .opengrep/README.md.
+#
+# Install with: pre-commit install --install-hooks
+repos:
+  - repo: local
+    hooks:
+      # The scripts scan the whole crate, so filenames are not passed. `files` still
+      # decides whether the hook runs at all, which keeps a docs-only commit free.
+      - id: opengrep-rule-tests
+        name: opengrep rule-tests
+        entry: scripts/opengrep-test.sh
+        language: script
+        pass_filenames: false
+        files: ^\.opengrep/
+      # Rules changing can flag code that already exists, so run the scan for those too.
+      - id: opengrep
+        name: opengrep (custom agentx-ifstack rules)
+        entry: scripts/opengrep-scan.sh
+        language: script
+        pass_filenames: false
+        files: ^(src/.*\.rs|\.opengrep/.*)$
+
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+fail_fast: false

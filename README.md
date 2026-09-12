@@ -243,7 +243,8 @@ cargo fmt --check
 ```
 
 `python3 packaging/test_policy.py` checks the release gate, push triggers, and
-service restart policy. It requires PyYAML 6.0.3. The shared checks workflow runs it.
+service restart policy. It requires PyYAML 6.0.3, pre-commit 4.5.1, `gh`, `jq`, and Bash.
+The shared checks workflow runs it.
 
 `tests/session.rs` runs the actual binary against a UnixListener. The master
 uses real AgentX PDUs. A fixture executable supplies `ip` output without

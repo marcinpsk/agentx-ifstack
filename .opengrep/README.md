@@ -14,11 +14,21 @@ stop coming back review after review.
 
 ## Relationship to CodeRabbit
 
-CodeRabbit auto-detects an opengrep config only when it is named `opengrep.yml` or
-`semgrep.yml` (and a few variants), and when it finds one it runs *that* **instead of** its
-default packs. This ruleset deliberately avoids those names, so CodeRabbit keeps running
-its own packs while these rules are enforced separately by `scripts/opengrep-scan.sh` and
-the CI job. Both rulesets apply.
+CodeRabbit steps aside from opengrep in two separate ways, and this setup avoids both.
+
+It auto-detects an opengrep config only when it is named `opengrep.yml` or `semgrep.yml`
+(and a few variants), and when it finds one it runs *that* **instead of** its default
+packs. This ruleset deliberately avoids those names.
+
+It also skips its own opengrep pass when it sees opengrep running in the workflows. These
+rules therefore run from a **local pre-commit hook only**, never in CI. Running them in CI
+would trade CodeRabbit's broad packs for this repo's two narrow rules, which is a straight
+loss. A policy test asserts no workflow mentions opengrep.
+
+Install the hook with `pre-commit install --install-hooks`. Both hooks carry a `files`
+filter, because the scripts scan the whole crate and would otherwise run on every commit:
+the scan runs when `src/` or the rules change, the rule-tests only when the rules change. A
+commit touching neither costs nothing.
 
 ## Layout
 
@@ -26,8 +36,8 @@ the CI job. Both rulesets apply.
 | --- | --- |
 | `.opengrep/agentx-ifstack-rules.yaml` | The ruleset, and the single source of truth. Named so CodeRabbit does not adopt it. |
 | `.opengrep/tests/*.rs` | Rule-test fixtures. `// ruleid:` must match, `// ok:` must not. They violate the rules on purpose and are not part of the crate. |
-| `scripts/opengrep-scan.sh` | Scan `src/`. Exits non-zero on any finding. |
-| `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
+| `scripts/opengrep-scan.sh` | Scan `src/`. Exits non-zero on any finding. Wired to pre-commit by `.pre-commit-config.yaml`. |
+| `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. Runs when the rules change. |
 
 ## Rules
 

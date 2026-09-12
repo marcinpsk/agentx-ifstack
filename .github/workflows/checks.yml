@@ -24,7 +24,7 @@ jobs:
           python-version: '3.13'
       - name: Check packaging policy
         run: |
-          python3 -m pip install PyYAML==6.0.3
+          python3 -m pip install PyYAML==6.0.3 pre-commit==4.5.1
           python3 packaging/test_policy.py
 
   # Dependabot raises version bumps. This reports whether the tree as locked carries a
@@ -41,27 +41,19 @@ jobs:
         with:
           command: check
 
-  # Project invariants clippy cannot express. Not a security scan: CodeQL already
-  # analyses this crate, and CodeRabbit keeps running its own opengrep packs because the
-  # ruleset is deliberately not named so CodeRabbit adopts it.
-  rules:
-    name: Custom rules
+  # Workflow-level audit: permissions, injection, unpinned actions. The other gates
+  # look at the crate and the packages, not at the workflows themselves.
+  zizmor:
+    name: Workflow audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install opengrep
-        env:
-          OPENGREP_VERSION: v1.30.0
-          OPENGREP_SHA256: 35779bdd72e92129c8df2a77f0c55e8c08356801ea92591ef32108d6b28d564c
-        run: |
-          curl -fsSL -o /usr/local/bin/opengrep \
-            "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
-          echo "${OPENGREP_SHA256}  /usr/local/bin/opengrep" | sha256sum -c -
-          chmod +x /usr/local/bin/opengrep
-          opengrep --version
-      - name: Run the rule-tests
-        run: ./scripts/opengrep-test.sh
-      - name: Run the custom ruleset
-        run: ./scripts/opengrep-scan.sh
+      # advanced-security uploads SARIF and needs security-events: write, which a called
+      # workflow cannot hold unless every caller grants it. The findings gate the job and
+      # appear as annotations, so the upload buys nothing worth widening the callers for.
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+          annotations: true

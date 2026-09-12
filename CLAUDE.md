@@ -55,7 +55,17 @@ as a separate job in `checks.yml`.
 Project invariants that clippy cannot express live in `.opengrep/agentx-ifstack-rules.yaml`.
 Run `scripts/opengrep-scan.sh` to check the source and `scripts/opengrep-test.sh` to check
 the rules themselves. Every rule needs a fixture in `.opengrep/tests/`, which the packaging
-policy tests enforce. See `.opengrep/README.md` for why the filename matters.
+policy tests enforce.
+
+These run from a local pre-commit hook, never in CI: CodeRabbit skips its own opengrep pass
+when it sees opengrep in the workflows. Install with `pre-commit install --install-hooks`.
+The hooks are filtered so a commit touching neither `src/` nor the rules costs nothing. See
+`.opengrep/README.md` for that and for why the filename matters.
+
+`zizmor` audits the workflows themselves (permissions, injection, unpinned actions) in the
+`Workflow audit` CI job. Run it locally with `uvx --native-tls zizmor .`, which is the
+scope the CI job audits: the repo root, so `dependabot.yml` is included, not only
+`.github/workflows/`. Export `GH_TOKEN` to add the online audits CI also runs.
 
 `rust-toolchain.toml` pins the toolchain, but a `RUSTUP_TOOLCHAIN` environment variable
 overrides it. Check that variable before blaming a build failure on the code.
@@ -153,3 +163,21 @@ Every interface also yields the two zero-index boundary rows RFC 2863 requires.
 - net-snmp `local/snmp-bridge-mib`, Perl AgentX subagent reading `/sys/class/net`,
   BRIDGE-MIB only.
 - `snmp_rust_agent`, `sunt`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues in this repo, driven through the `gh` CLI. External pull
+requests are treated as a request surface and triaged alongside issues. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label string equal to its name. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. Neither exists yet, and the
+skills proceed silently rather than scaffolding them. See `docs/agents/domain.md`.

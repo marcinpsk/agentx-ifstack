@@ -2,15 +2,29 @@
 
 import ast
 import configparser
+import contextlib
+import functools
+import json
+import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import tomllib
 import yaml
+from pre_commit.clientlib import load_config
+from pre_commit.commands.run import Classifier
+from pre_commit.hook import Hook
+from pre_commit.prefix import Prefix
+from pre_commit.repository import _hook
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -60,6 +74,130 @@ def workflow(name):
     return yaml.load(
         (ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader
     )
+
+
+def effective_permissions(owner, inherited):
+    if "permissions" not in owner:
+        return inherited
+    declared = owner["permissions"]
+    if isinstance(declared, str):
+        return {"*": declared.removesuffix("-all")}
+    return dict(declared or {})
+
+
+INLINE_CODE = re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
+
+
+def markdown_code_spans(path):
+    """Extract inline code and fenced blocks in document order."""
+    spans = []
+    prose = []
+    fenced = []
+    marker = None
+
+    def inline_spans():
+        spans.extend(match[2] for match in INLINE_CODE.finditer("".join(prose)))
+        prose.clear()
+
+    for line in path.read_text().splitlines(keepends=True):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\n"))
+        if marker is None:
+            if fence:
+                inline_spans()
+                marker = fence[1]
+            else:
+                prose.append(line)
+        elif (fence and fence[1][0] == marker[0]
+              and len(fence[1]) >= len(marker) and not fence[2].strip()):
+            spans.append("".join(fenced))
+            fenced.clear()
+            marker = None
+        else:
+            fenced.append(line)
+    assert marker is None, f"{path}: unclosed code fence"
+    inline_spans()
+    return spans
+
+
+def documented_shell_commands(path):
+    """Yield shell token lists, preserving quotes and splitting shell operators."""
+    shell_parts = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|\#[^\n]*|[;&|()\n]+""")
+    for span in markdown_code_spans(path):
+        span = span.replace("\\\n", "")
+        start = 0
+        for part in shell_parts.finditer(span):
+            if part[0][0] in ";&|()\n":
+                words = shlex.split(span[start:part.start()], comments=True)
+                if words:
+                    yield words
+                start = part.end()
+        words = shlex.split(span[start:], comments=True)
+        if words:
+            yield words
+
+
+@functools.cache
+def gh_json_fields(group, subcommand):
+    """Field names gh accepts for `gh <group> <sub> --json`, read from gh itself."""
+    with tempfile.TemporaryDirectory() as config:
+        probe = subprocess.run(
+            ["gh", group, subcommand, "--json"],
+            capture_output=True, text=True, timeout=30, check=False,
+            env={**os.environ, "GH_TOKEN": "", "GH_CONFIG_DIR": config},
+        )
+    output = probe.stdout + probe.stderr
+    if "comma-separated fields" not in output:
+        raise AssertionError(
+            f"gh {group} {subcommand} --json did not list its fields: {output}"
+        )
+    return frozenset(
+        line.strip() for line in output.splitlines() if line.startswith("  ")
+    )
+
+
+def documented_gh_json_commands(path):
+    """Yield (group, subcommand, fields) for each documented `gh ... --json` command."""
+    yield from _gh_json_commands(documented_shell_commands(path))
+
+
+def documented_gh_json_commands_in(text):
+    """The same, for one Markdown fragment rather than a whole document."""
+    yield from _gh_json_commands(
+        shlex.split(span) for span in INLINE_CODE.findall(text) for span in [span[1]]
+    )
+
+
+def _gh_json_commands(commands):
+    for words in commands:
+        if "gh" not in words:
+            continue
+        arguments = words[words.index("gh") + 1:]
+        if len(arguments) < 2:
+            continue
+        group, subcommand = arguments[:2]
+        _, options = shell_options(arguments[2:], {"--json"})
+        for option, value in options:
+            if option == "--json" and value:
+                yield group, subcommand, value.split(",")
+
+
+def shell_options(arguments, value_options):
+    """Return positional tokens and ordered option/value pairs for a CLI schema."""
+    positional = []
+    options = []
+    words = iter(arguments)
+    for word in words:
+        if word == "--":
+            positional.extend(words)
+            break
+        if not word.startswith("-") or word == "-":
+            positional.append(word)
+            continue
+        option, equals, value = word.partition("=")
+        if not equals:
+            value = next(words, None) if option in value_options else None
+        options.append((option, value))
+    return positional, options
 
 
 class PackagingPolicyTests(unittest.TestCase):
@@ -114,6 +252,22 @@ class PackagingPolicyTests(unittest.TestCase):
         # A feat: on a 0.x version must not jump to 1.0.0 while the wire format settles.
         self.assertIs(release["major_on_zero"], False)
         self.assertIs(release["allow_zero_version"], True)
+
+    def test_a_merge_commit_subject_can_bump_the_version(self):
+        """Pull requests merge with merge_commit_title = PR_TITLE, so the conventional
+        subject lives on the merge commit. python-semantic-release ignores merge commits
+        by default, which silently drops that subject and bumps from the branch commits.
+
+        Measured on a scratch repository tagged v0.1.0, with a `fix:` on the branch and a
+        `feat:` merge subject: the default yields 0.1.1, this setting yields 0.2.0.
+        """
+        config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        parser = config["tool"]["semantic_release"]["commit_parser_options"]
+        self.assertIs(
+            parser.get("ignore_merge_commits"),
+            False,
+            "merge commits carry the conventional subject here, so they must be parsed",
+        )
 
     def test_the_release_uploads_both_package_formats(self):
         """`version` builds dist/ and creates the release but uploads nothing from it.
@@ -336,11 +490,227 @@ class PackagingPolicyTests(unittest.TestCase):
             for reference in uses_references(
                 yaml.load(path.read_text(), Loader=yaml.BaseLoader)
             ):
-                if reference.startswith("./"):
-                    continue  # a local reusable workflow is versioned with this repo
+                # Both local forms are versioned with this repo, so neither takes a SHA.
+                # "$/" is GitHub's self-repository syntax, which is itself a pinning form.
+                if reference.startswith(("./", "$/")):
+                    continue
                 if not PINNED_ACTION.match(reference):
                     unpinned.append(f"{path.name} {reference}")
         self.assertEqual(unpinned, [], "third-party actions must be pinned to a SHA")
+
+    def test_ci_leaves_opengrep_to_coderabbit_and_the_local_hook(self):
+        """CodeRabbit skips its own opengrep pass when it sees opengrep in the workflows.
+
+        Running it in CI therefore replaces CodeRabbit's broad coverage with this repo's
+        two narrow rules, which is a straight loss. The ruleset runs from a local
+        pre-commit hook instead, so both the custom rules and CodeRabbit's packs apply.
+        """
+        for path in sorted(workflow_paths()):
+            text = path.read_text()
+            self.assertNotIn(
+                "opengrep",
+                text.lower(),
+                f"{path.name}: opengrep in a workflow suppresses CodeRabbit's own pass; "
+                "run it from the local pre-commit hook instead",
+            )
+
+        config = ROOT / ".pre-commit-config.yaml"
+        self.assertTrue(config.exists(), "the local hook config is missing")
+        config_data = yaml.safe_load(config.read_text())
+        resolved_config = load_config(str(config))
+        self.assertIn("pre-commit", resolved_config["default_install_hook_types"])
+        resolved_hooks = {
+            hook["id"]: Hook.create(
+                repo["repo"], Prefix(str(ROOT)), _hook(hook, root_config=resolved_config)
+            )
+            for repo in resolved_config["repos"]
+            for hook in repo["hooks"]
+        }
+        hooks = [
+            hook for repo in config_data["repos"] for hook in repo.get("hooks", [])
+        ]
+        by_id = {h.get("id"): h for h in hooks}
+        # Read the paths from disk rather than sampling, so a filter narrowed to one file
+        # cannot pass while real files silently lose coverage.
+        sources = sorted(str(f.relative_to(ROOT)) for f in (ROOT / "src").rglob("*.rs"))
+        ruleset = sorted(
+            str(f.relative_to(ROOT)) for f in (ROOT / ".opengrep").rglob("*") if f.is_file()
+        )
+        self.assertTrue(sources and ruleset, "expected source and ruleset files on disk")
+
+        for hook_id, entry, must_match, must_skip in (
+            ("opengrep", "scripts/opengrep-scan.sh", sources + ruleset, []),
+            ("opengrep-rule-tests", "scripts/opengrep-test.sh", ruleset, sources),
+        ):
+            hook = by_id.get(hook_id)
+            self.assertIsNotNone(hook, f"the {hook_id} hook is missing")
+            # A hook can be neutered without touching its files filter.
+            self.assertEqual(hook.get("entry"), entry, f"{hook_id} runs the wrong command")
+            self.assertEqual(hook.get("language"), "script", f"{hook_id} must run the script")
+            self.assertIsNone(hook.get("exclude"), f"{hook_id} must not exclude its inputs")
+            resolved = resolved_hooks[hook_id]
+            self.assertFalse(resolved.pass_filenames, f"{hook_id} must scan all inputs")
+            self.assertIn(
+                "pre-commit",
+                resolved.stages,
+                f"{hook_id} must run at the pre-commit stage",
+            )
+            self.assertTrue((ROOT / entry).is_file(), f"{entry} does not exist")
+            self.assertTrue(os.access(ROOT / entry, os.X_OK), f"{entry} is not executable")
+            pattern = hook.get("files")
+            self.assertTrue(pattern, f"hook {hook_id} needs a files filter")
+            for candidate in must_match:
+                self.assertRegex(candidate, pattern, f"{hook_id} would skip {candidate}")
+            for candidate in must_skip:
+                self.assertNotRegex(candidate, pattern, f"{hook_id} runs for {candidate}")
+            with contextlib.chdir(ROOT):
+                selected = set(
+                    Classifier.from_config(
+                        sources + ruleset,
+                        resolved_config["files"],
+                        resolved_config["exclude"],
+                    ).filenames_for_hook(resolved)
+                )
+            self.assertTrue(
+                set(must_match) <= selected,
+                f"{hook_id} skips {set(must_match) - selected}",
+            )
+            self.assertFalse(set(must_skip) & selected, f"{hook_id} selects excluded inputs")
+
+    def test_a_called_workflow_never_outranks_its_callers(self):
+        """A reusable workflow's job cannot exceed the permissions of the job calling it.
+
+        GitHub refuses the run rather than trimming the request. Resolve effective
+        permissions on both sides, because a job inherits the workflow's top-level block,
+        and compare access levels: a callee may ask for less than the caller grants, but
+        never more.
+        """
+        levels = {"none": 0, "read": 1, "write": 2}
+
+        def level_of(perms, scope):
+            return levels[perms.get(scope, perms.get("*", "none"))]
+
+        callers = {}
+        for path in sorted(workflow_paths()):
+            data = workflow(path.name)
+            top = effective_permissions(data, {})
+            for job in data.get("jobs", {}).values():
+                target = str(job.get("uses", ""))
+                if not target.startswith(("./", "$/")):
+                    continue
+                callers.setdefault(target.rsplit("/", 1)[-1], []).append(
+                    (path.name, effective_permissions(job, top))
+                )
+
+        for name, grants in sorted(callers.items()):
+            callee = workflow(name)
+            self.assertIn("permissions", callee, f"{name} declares no permissions")
+            callee_top = effective_permissions(callee, {})
+            for job_name, job in callee.get("jobs", {}).items():
+                wanted = effective_permissions(job, callee_top)
+                scopes = set(wanted).union(*(g for _, g in grants))
+                for scope in sorted(scopes):
+                    need = level_of(wanted, scope)
+                    if need == 0:
+                        continue
+                    for caller_name, granted in grants:
+                        self.assertGreaterEqual(
+                            level_of(granted, scope),
+                            need,
+                            f"{name} job {job_name} requests {scope} level {need}, but "
+                            f"{caller_name} grants level {level_of(granted, scope)}",
+                        )
+
+    def test_the_workflows_are_audited_by_zizmor(self):
+        """Workflow permissions and injection risks are not covered by the other gates."""
+        steps = [
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+        ]
+        uses = " ".join(str(step.get("uses", "")) for step in steps)
+        self.assertIn("zizmor", uses, "no job audits the workflows with zizmor")
+        audits = [
+            (job, step)
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("zizmorcore/zizmor-action@")
+        ]
+        self.assertTrue(
+            any(
+                "if" not in job
+                and "if" not in step
+                and job.get("continue-on-error", "false") == "false"
+                and step.get("continue-on-error", "false") == "false"
+                for job, step in audits
+            ),
+            "zizmor must run without conditions and propagate failures",
+        )
+
+    def test_the_documented_zizmor_command_matches_ci(self):
+        """A narrower local command passes while CI fails.
+
+        The documented command audited `.github/workflows/` while the action defaults to
+        the repo root, so `dependabot.yml` was never audited locally and its three
+        cooldown findings only appeared in CI.
+        """
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if str(step.get("uses", "")).startswith("zizmorcore/zizmor-action@")
+        )
+        options = step.get("with") or {}
+        # Defaults from the action's own action.yml at the pinned SHA.
+        expected_inputs = sorted(str(options.get("inputs", ".")).split())
+        expected_persona = str(options.get("persona", "regular"))
+
+        invocations = []
+        for name in ("CLAUDE.md", "README.md"):
+            for words in documented_shell_commands(ROOT / name):
+                index = next(
+                    (
+                        position
+                        for position, word in enumerate(words)
+                        if word == "zizmor" or word.startswith("zizmor@")
+                    ),
+                    None,
+                )
+                if index is None or len(words) == 1:
+                    continue  # prose naming the tool, not a command
+                invocations.append((name, words, index))
+        self.assertTrue(invocations, "no documented zizmor command to check")
+
+        for name, words, index in invocations:
+            arguments = words[index + 1 :]
+            paths, parsed = shell_options(arguments, {"--persona", "--collect"})
+            paths.sort()
+            self.assertEqual(
+                paths,
+                expected_inputs,
+                f"{name}: the documented zizmor command audits {paths}, "
+                f"but the CI job audits {expected_inputs}",
+            )
+            persona = "regular"
+            collection = []
+            for option, value in parsed:
+                if option == "--persona":
+                    persona = value
+                elif option in ("--pedantic", "-p"):
+                    persona = "pedantic"
+                elif option == "--collect":
+                    self.assertIsNotNone(value, "--collect requires a value")
+                    collection.extend(value.split(","))
+            self.assertEqual(
+                collection or ["default"], ["default"],
+                f"{name}: documented collection must match CI's default collection",
+            )
+            self.assertEqual(
+                persona,
+                expected_persona,
+                f"{name}: the documented zizmor command uses persona {persona}, "
+                f"but the CI job uses {expected_persona}",
+            )
 
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.
@@ -421,12 +791,9 @@ class PackagingPolicyTests(unittest.TestCase):
                 fixture.exists(), f"rule {rule['id']} has no rule-test fixture"
             )
 
-        steps = workflow("checks.yml")["jobs"]["rules"]["steps"]
-        commands = "\n".join(str(step.get("run", "")) for step in steps)
-        self.assertIn("opengrep-test.sh", commands, "CI must run the rule-tests")
-        self.assertIn("opengrep-scan.sh", commands, "CI must run the ruleset")
-        # The binary is fetched over the network, so pin it by digest.
-        self.assertIn("sha256sum -c -", commands, "pin the opengrep binary by checksum")
+        # Where the ruleset actually runs is asserted by
+        # test_ci_leaves_opengrep_to_coderabbit_and_the_local_hook: the pre-commit hook,
+        # never CI, because CodeRabbit skips its own pass when it sees opengrep there.
 
     def test_package_scripts_use_private_temporary_files(self):
         """A predictable temporary path lets a local user redirect a root-run write."""
@@ -518,6 +885,396 @@ class PackagingPolicyTests(unittest.TestCase):
             any(line < min(returns) for line in calls),
             "call sync_parent before the early return, so a retry repairs a failed sync",
         )
+
+    def test_documented_gh_json_fields_exist(self):
+        """gh rejects an unknown --json field, so a wrong one makes the skill unusable.
+
+        `gh pr list --json authorAssociation` shipped here once and fails with
+        "Unknown JSON field". gh validates the names locally, before auth and before
+        any request, and an empty --json prints the accepted set for a subcommand.
+        """
+        documented = []
+        for path in sorted((ROOT / "docs" / "agents").glob("*.md")):
+            for words in documented_shell_commands(path):
+                if "gh" not in words:
+                    continue
+                arguments = words[words.index("gh") + 1:]
+                if len(arguments) < 2:
+                    continue
+                group, subcommand = arguments[:2]
+                _, options = shell_options(arguments[2:], {"--json"})
+                for option, value in options:
+                    if option == "--json" and value:
+                        documented.append(
+                            (path.name, group, subcommand, value.split(","))
+                        )
+        self.assertTrue(documented, "expected documented gh --json commands")
+        for name, group, subcommand, fields in documented:
+            for field in fields:
+                self.assertIn(
+                    field,
+                    gh_json_fields(group, subcommand),
+                    f"{name}: gh {group} {subcommand} has no --json field {field!r}",
+                )
+
+    def test_documented_procedures_fetch_the_fields_they_read(self):
+        """A procedure that names a field in prose must request it in its own command.
+
+        The frontier query listed `state,blockedBy,assignees` and then told the reader to
+        add `body`, so the documented command could not detect a `Blocked by:` fallback.
+        """
+        incomplete = []
+        for path in sorted((ROOT / "docs" / "agents").glob("*.md")):
+            for item in re.split(r"^(?=- )", path.read_text(), flags=re.MULTILINE):
+                requested = set()
+                accepted = set()
+                for group, subcommand, fields in documented_gh_json_commands_in(item):
+                    requested.update(fields)
+                    accepted |= gh_json_fields(group, subcommand)
+                mentioned = {
+                    match[2] for match in INLINE_CODE.finditer(item)
+                } & (accepted - requested)
+                incomplete.extend(
+                    f"{path.name}: {field!r} is read in prose but no --json list "
+                    "in the same step requests it"
+                    for field in sorted(mentioned)
+                )
+        self.assertEqual(incomplete, [])
+
+
+class GuardRegressionTests(unittest.TestCase):
+    def setUp(self):
+        global ROOT
+        original_root = ROOT
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        for name in (".github", ".opengrep", "src", "scripts", "docs"):
+            shutil.copytree(ROOT / name, self.root / name)
+        for name in (".pre-commit-config.yaml", "CLAUDE.md", "README.md"):
+            shutil.copy2(ROOT / name, self.root)
+        self.addCleanup(setattr, sys.modules[__name__], "ROOT", original_root)
+        ROOT = self.root
+        self.addCleanup(os.chdir, Path.cwd())
+        os.chdir(ROOT)
+        self.policy = PackagingPolicyTests()
+
+    def mutate(self, name, change):
+        path = ROOT / name
+        data = yaml.safe_load(path.read_text())
+        change(data)
+        path.write_text(yaml.safe_dump(data))
+
+    def reject_hook(self, change):
+        self.mutate(".pre-commit-config.yaml", change)
+        with self.assertRaises(AssertionError):
+            self.policy.test_ci_leaves_opengrep_to_coderabbit_and_the_local_hook()
+
+    def test_hook_rejects_effective_file_filters(self):
+        path = ROOT / ".pre-commit-config.yaml"
+        baseline = path.read_text()
+        for owner, field, value in (
+            ("hook", "types", ["python"]),
+            ("hook", "types_or", ["python"]),
+            ("hook", "exclude_types", ["rust"]),
+            ("global", "exclude", ".*"),
+            ("global", "files", r"\.py$"),
+        ):
+            with self.subTest(owner=owner, field=field):
+                path.write_text(baseline)
+
+                def change(config, owner=owner, field=field, value=value):
+                    target = config if owner == "global" else config["repos"][0]["hooks"][1]
+                    target[field] = value
+
+                self.reject_hook(change)
+
+    def test_hook_rejects_passed_filenames(self):
+        self.reject_hook(
+            lambda config: config["repos"][0]["hooks"][1].update(pass_filenames=True)
+        )
+
+    def test_hook_rejects_missing_install_stage(self):
+        self.reject_hook(
+            lambda config: config.update(default_install_hook_types=["pre-push"])
+        )
+
+    def test_hook_accepts_effective_defaults(self):
+        def change(config):
+            config.pop("default_install_hook_types")
+            config.pop("default_stages")
+            config["repos"][0]["hooks"][1]["types_or"] = ["rust", "yaml", "markdown"]
+
+        self.mutate(".pre-commit-config.yaml", change)
+        self.policy.test_ci_leaves_opengrep_to_coderabbit_and_the_local_hook()
+
+    def test_permissions_reject_wildcard_increases(self):
+        for caller, callee in (
+            ("read-all", "write-all"),
+            ({}, "read-all"),
+            ({"contents": "write"}, "read-all"),
+        ):
+            with self.subTest(caller=caller, callee=callee):
+                for name, permissions in (
+                    ("ci.yml", caller), ("release.yml", caller), ("checks.yml", callee)
+                ):
+                    self.mutate(
+                        f".github/workflows/{name}",
+                        lambda data, permissions=permissions: data.update(
+                            permissions=permissions
+                        ),
+                    )
+                with self.assertRaisesRegex(AssertionError, "checks.yml"):
+                    self.policy.test_a_called_workflow_never_outranks_its_callers()
+
+    def test_permissions_accept_wildcard_reductions(self):
+        for name in ("ci.yml", "release.yml"):
+            self.mutate(
+                f".github/workflows/{name}",
+                lambda data: data.update(permissions="write-all"),
+            )
+        self.mutate(
+            ".github/workflows/checks.yml",
+            lambda data: data.update(permissions="read-all"),
+        )
+        self.policy.test_a_called_workflow_never_outranks_its_callers()
+
+    def test_audit_rejects_disabled_or_nonblocking_execution(self):
+        path = ROOT / ".github/workflows/checks.yml"
+        baseline = path.read_text()
+        for owner, field, value in (
+            ("job", "if", "false"),
+            ("job", "if", "${{ github.event_name == 'push' }}"),
+            ("step", "if", "${{ false }}"),
+            ("job", "continue-on-error", True),
+            ("step", "continue-on-error", True),
+        ):
+            with self.subTest(owner=owner, field=field, value=value):
+                path.write_text(baseline)
+
+                def change(data, owner=owner, field=field, value=value):
+                    job = data["jobs"]["zizmor"]
+                    target = job if owner == "job" else job["steps"][-1]
+                    target[field] = value
+
+                self.mutate(".github/workflows/checks.yml", change)
+                with self.assertRaises(AssertionError):
+                    self.policy.test_the_workflows_are_audited_by_zizmor()
+
+    def test_gh_json_guard_rejects_a_field_the_cli_lacks(self):
+        document = ROOT / "docs/agents/issue-tracker.md"
+        document.write_text(
+            document.read_text().replace(
+                "--json subIssues", "--json subIssues,authorAssociation"
+            )
+        )
+        with self.assertRaisesRegex(AssertionError, "authorAssociation"):
+            self.policy.test_documented_gh_json_fields_exist()
+
+    def test_zizmor_guard_rejects_a_documented_command_narrower_than_ci(self):
+        baseline = (ROOT / "CLAUDE.md").read_text()
+        for replacement, expected in (
+            ("uvx --native-tls zizmor .github/workflows/", "audits"),
+            ("uvx --native-tls zizmor --persona=pedantic .", "persona"),
+        ):
+            with self.subTest(replacement=replacement):
+                (ROOT / "CLAUDE.md").write_text(
+                    baseline.replace("uvx --native-tls zizmor .", replacement)
+                )
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_the_documented_zizmor_command_matches_ci()
+        (ROOT / "CLAUDE.md").write_text(baseline)
+
+        # The guard follows the job, so widening CI alone must also fail.
+        self.mutate(
+            ".github/workflows/checks.yml",
+            lambda data: data["jobs"]["zizmor"]["steps"][-1].update(
+                {"with": {"advanced-security": False, "inputs": ".github .opengrep"}}
+            ),
+        )
+        with self.assertRaisesRegex(AssertionError, "audits"):
+            self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_ticket_fetch_resolves_pr_before_issue(self):
+        document = (ROOT / "docs/agents/issue-tracker.md").read_text()
+        instruction = document.split('## When a skill says "fetch the relevant ticket"')[1]
+        instruction = instruction.split("##", 1)[0]
+        self.assertIn(
+            "gh pr view <number> --comments` and fall back to "
+            "`gh issue view <number> --comments", instruction,
+        )
+
+    def test_field_completeness_guard_checks_prose_against_the_command(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for old, new, expected in (
+            # A field dropped from the command while the prose still reads it.
+            ("--json state,blockedBy,assignees,body", "--json state,blockedBy,assignees", "body"),
+            # A field named in prose that no command in the step requests.
+            ("has an open entry in `blockedBy`", "has an open entry in `blockedBy` or `milestone`",
+             "milestone"),
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(old, baseline)
+                path.write_text(baseline.replace(old, new))
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_documented_procedures_fetch_the_fields_they_read()
+
+        # A mention satisfied by a different command in the same step is not a defect,
+        # and a mention that is not a real field is not one either: the external-PR step
+        # names authorAssociation precisely to say gh does not have it.
+        path.write_text(baseline.replace(
+            "The first eligible child in map order wins.",
+            "The first eligible child in map order wins, read from `subIssues`.",
+        ))
+        self.policy.test_documented_procedures_fetch_the_fields_they_read()
+        path.write_text(baseline)
+        self.policy.test_documented_procedures_fetch_the_fields_they_read()
+
+    def test_gh_json_guard_checks_complete_fields_in_every_command(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for addition, field in (
+            ('`gh issue view 1 --json=authorAssociation`', "authorAssociation"),
+            ('`gh issue view 1 --json "authorAssociation"`', "authorAssociation"),
+            ('`gh issue view 1 --json title_typo`', "title_typo"),
+            ('`gh issue view 1 --json \\\n authorAssociation`', "authorAssociation"),
+            ('```sh\ngh issue view 1 --json title\ngh issue view 1 --json authorAssociation\n```', "authorAssociation"),
+            ('~~~sh\ngh issue view 1 --json authorAssociation\n~~~', "authorAssociation"),
+            *(
+                (f'`gh issue view 1 --json title {operator} gh issue view 1 --json title_typo`', "title_typo")
+                for operator in (";", "&&", "||", "|", "&")
+            ),
+        ):
+            with self.subTest(addition=addition):
+                path.write_text(baseline + "\n" + addition + "\n")
+                with self.assertRaisesRegex(AssertionError, field):
+                    self.policy.test_documented_gh_json_fields_exist()
+
+    def test_zizmor_guard_checks_collection_and_persona_options(self):
+        path = ROOT / "CLAUDE.md"
+        baseline = path.read_text()
+        for option, expected in (
+            ("--collect=workflows", "collect"),
+            ('--collect "workflows"', "collect"),
+            ("--pedantic", "persona"),
+            ("-p", "persona"),
+        ):
+            with self.subTest(option=option):
+                path.write_text(baseline.replace(
+                    "uvx --native-tls zizmor .", f"uvx --native-tls zizmor {option} ."
+                ))
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_zizmor_guard_checks_tilde_fences_in_another_document(self):
+        path = ROOT / "README.md"
+        path.write_text(path.read_text() +
+                        "\n~~~sh\nuvx --native-tls zizmor .github/workflows/\n~~~\n")
+        with self.assertRaisesRegex(AssertionError, "audits"):
+            self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_external_pr_query_reads_later_pages(self):
+        document = (ROOT / "docs/agents/issue-tracker.md").read_text()
+        command = re.search(
+            r'`(gh api "repos/<owner>/<repo>/pulls\?state=open"[^`]+)`', document
+        )[1]
+        pages = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                page = int(parse_qs(urlsplit(self.path).query).get("page", ["1"])[0])
+                pages.append(page)
+                records = [
+                    {
+                        "number": number,
+                        "title": "Example",
+                        "user": {"login": "contributor"},
+                        "author_association": "MEMBER" if number < 30 else "CONTRIBUTOR",
+                    }
+                    for number in (range(1, 31) if page == 1 else [31])
+                ]
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                if page == 1:
+                    self.send_header("Link", f'<{endpoint}&page=2>; rel="next"')
+                self.end_headers()
+                self.wfile.write(json.dumps(records).encode())
+
+            def log_message(self, *_args):
+                pass
+
+        with ThreadingHTTPServer(("localhost", 0), Handler) as server:
+            endpoint = (
+                f"http://localhost:{server.server_port}"
+                "/repos/example/project/pulls?state=open"
+            )
+            command = command.replace(
+                '"repos/<owner>/<repo>/pulls?state=open"', shlex.quote(endpoint)
+            )
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                result = subprocess.run(
+                    ["bash", "-o", "pipefail", "-c", command],
+                    capture_output=True, text=True, timeout=15, check=False,
+                    env={
+                        **os.environ,
+                        "GH_TOKEN": "placeholder",
+                        "GH_ENTERPRISE_TOKEN": "placeholder",
+                        "GH_CONFIG_DIR": str(ROOT / "gh-config"),
+                        "GH_DEBUG": "",
+                    },
+                )
+            finally:
+                server.shutdown()
+                thread.join()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = json.loads(result.stdout)
+        self.assertEqual([record["number"] for record in records], [30, 31], result.stdout)
+        self.assertEqual(pages, [1, 2])
+
+    def test_external_pr_query_requires_pagination_and_one_json_value(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for old, new in (
+            ("--paginate --slurp", "--slurp"),
+            ("--paginate --slurp | jq '[.[][]", "--paginate --jq '[.[]"),
+        ):
+            with self.subTest(replacement=new):
+                self.assertIn(old, baseline)
+                path.write_text(baseline.replace(old, new))
+                with self.assertRaises((AssertionError, json.JSONDecodeError)):
+                    self.test_external_pr_query_reads_later_pages()
+
+    def test_documented_commands_preserve_valid_quotes_and_continuations(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        path.write_text(
+            path.read_text() + '\n`gh issue view 1 --json="title,body"`\n'
+            '`gh issue view 1 --json "title,body"`\n'
+            '~~~sh\ngh issue view 1 --json \\\n title,body\n~~~\n'
+            '```sh\ngh issue view 1 --json title # fields\n'
+            'gh issue view 1 --json body\n```\n'
+        )
+        self.policy.test_documented_gh_json_fields_exist()
+        path = ROOT / "README.md"
+        path.write_text(path.read_text() +
+                        '\n~~~sh\nuvx --native-tls zizmor \\\n'
+                        ' --persona "regular" --collect=default .\n~~~\n')
+        self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_shell_commands_keep_quoted_operators_as_arguments(self):
+        path = ROOT / "commands.md"
+        path.write_text('````sh\ngh issue view 1 --json="title,body" '
+                        '--jq ".[] | .title"; printf "%s" "|"\n````\n')
+        commands = list(documented_shell_commands(path))
+        self.assertEqual(commands, [
+            ["gh", "issue", "view", "1", "--json=title,body", "--jq", ".[] | .title"],
+            ["printf", "%s", "|"],
+        ])
+        self.assertEqual(shell_options(commands[0][3:], {"--json", "--jq"}),
+                         (["1"], [("--json", "title,body"), ("--jq", ".[] | .title")]))
+
 
 if __name__ == "__main__":
     unittest.main()
