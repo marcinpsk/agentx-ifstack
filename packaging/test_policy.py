@@ -3,6 +3,7 @@
 import ast
 import configparser
 import contextlib
+import functools
 import json
 import os
 import re
@@ -84,6 +85,9 @@ def effective_permissions(owner, inherited):
     return dict(declared or {})
 
 
+INLINE_CODE = re.compile(r"(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.DOTALL)
+
+
 def markdown_code_spans(path):
     """Extract inline code and fenced blocks in document order."""
     spans = []
@@ -92,9 +96,7 @@ def markdown_code_spans(path):
     marker = None
 
     def inline_spans():
-        spans.extend(match[2] for match in re.finditer(
-            r"(`+)(?!`)(.+?)(?<!`)\1(?!`)", "".join(prose), re.DOTALL
-        ))
+        spans.extend(match[2] for match in INLINE_CODE.finditer("".join(prose)))
         prose.clear()
 
     for line in path.read_text().splitlines(keepends=True):
@@ -132,6 +134,51 @@ def documented_shell_commands(path):
         words = shlex.split(span[start:], comments=True)
         if words:
             yield words
+
+
+@functools.cache
+def gh_json_fields(group, subcommand):
+    """Field names gh accepts for `gh <group> <sub> --json`, read from gh itself."""
+    with tempfile.TemporaryDirectory() as config:
+        probe = subprocess.run(
+            ["gh", group, subcommand, "--json"],
+            capture_output=True, text=True, timeout=30, check=False,
+            env={**os.environ, "GH_TOKEN": "", "GH_CONFIG_DIR": config},
+        )
+    output = probe.stdout + probe.stderr
+    if "comma-separated fields" not in output:
+        raise AssertionError(
+            f"gh {group} {subcommand} --json did not list its fields: {output}"
+        )
+    return frozenset(
+        line.strip() for line in output.splitlines() if line.startswith("  ")
+    )
+
+
+def documented_gh_json_commands(path):
+    """Yield (group, subcommand, fields) for each documented `gh ... --json` command."""
+    yield from _gh_json_commands(documented_shell_commands(path))
+
+
+def documented_gh_json_commands_in(text):
+    """The same, for one Markdown fragment rather than a whole document."""
+    yield from _gh_json_commands(
+        shlex.split(span) for span in INLINE_CODE.findall(text) for span in [span[1]]
+    )
+
+
+def _gh_json_commands(commands):
+    for words in commands:
+        if "gh" not in words:
+            continue
+        arguments = words[words.index("gh") + 1:]
+        if len(arguments) < 2:
+            continue
+        group, subcommand = arguments[:2]
+        _, options = shell_options(arguments[2:], {"--json"})
+        for option, value in options:
+            if option == "--json" and value:
+                yield group, subcommand, value.split(",")
 
 
 def shell_options(arguments, value_options):
@@ -862,37 +909,37 @@ class PackagingPolicyTests(unittest.TestCase):
                             (path.name, group, subcommand, value.split(","))
                         )
         self.assertTrue(documented, "expected documented gh --json commands")
-
-        accepted = {}
-        with tempfile.TemporaryDirectory() as config:
-            for _, group, subcommand, _fields in documented:
-                if (group, subcommand) in accepted:
-                    continue
-                probe = subprocess.run(
-                    ["gh", group, subcommand, "--json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=False,
-                    env={**os.environ, "GH_TOKEN": "", "GH_CONFIG_DIR": config},
-                )
-                output = probe.stdout + probe.stderr
-                self.assertIn(
-                    "comma-separated fields",
-                    output,
-                    f"gh {group} {subcommand} --json did not list its fields: {output}",
-                )
-                accepted[(group, subcommand)] = {
-                    line.strip() for line in output.splitlines() if line.startswith("  ")
-                }
-
         for name, group, subcommand, fields in documented:
             for field in fields:
                 self.assertIn(
                     field,
-                    accepted[(group, subcommand)],
+                    gh_json_fields(group, subcommand),
                     f"{name}: gh {group} {subcommand} has no --json field {field!r}",
                 )
+
+    def test_documented_procedures_fetch_the_fields_they_read(self):
+        """A procedure that names a field in prose must request it in its own command.
+
+        The frontier query listed `state,blockedBy,assignees` and then told the reader to
+        add `body`, so the documented command could not detect a `Blocked by:` fallback.
+        """
+        incomplete = []
+        for path in sorted((ROOT / "docs" / "agents").glob("*.md")):
+            for item in re.split(r"^(?=- )", path.read_text(), flags=re.MULTILINE):
+                requested = set()
+                accepted = set()
+                for group, subcommand, fields in documented_gh_json_commands_in(item):
+                    requested.update(fields)
+                    accepted |= gh_json_fields(group, subcommand)
+                mentioned = {
+                    match[2] for match in INLINE_CODE.finditer(item)
+                } & (accepted - requested)
+                incomplete.extend(
+                    f"{path.name}: {field!r} is read in prose but no --json list "
+                    "in the same step requests it"
+                    for field in sorted(mentioned)
+                )
+        self.assertEqual(incomplete, [])
 
 
 class GuardRegressionTests(unittest.TestCase):
@@ -1056,6 +1103,33 @@ class GuardRegressionTests(unittest.TestCase):
             "gh pr view <number> --comments` and fall back to "
             "`gh issue view <number> --comments", instruction,
         )
+
+    def test_field_completeness_guard_checks_prose_against_the_command(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for old, new, expected in (
+            # A field dropped from the command while the prose still reads it.
+            ("--json state,blockedBy,assignees,body", "--json state,blockedBy,assignees", "body"),
+            # A field named in prose that no command in the step requests.
+            ("has an open entry in `blockedBy`", "has an open entry in `blockedBy` or `milestone`",
+             "milestone"),
+        ):
+            with self.subTest(expected=expected):
+                self.assertIn(old, baseline)
+                path.write_text(baseline.replace(old, new))
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_documented_procedures_fetch_the_fields_they_read()
+
+        # A mention satisfied by a different command in the same step is not a defect,
+        # and a mention that is not a real field is not one either: the external-PR step
+        # names authorAssociation precisely to say gh does not have it.
+        path.write_text(baseline.replace(
+            "The first eligible child in map order wins.",
+            "The first eligible child in map order wins, read from `subIssues`.",
+        ))
+        self.policy.test_documented_procedures_fetch_the_fields_they_read()
+        path.write_text(baseline)
+        self.policy.test_documented_procedures_fetch_the_fields_they_read()
 
     def test_gh_json_guard_checks_complete_fields_in_every_command(self):
         path = ROOT / "docs/agents/issue-tracker.md"
