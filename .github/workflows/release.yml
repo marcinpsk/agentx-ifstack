@@ -12,7 +12,7 @@ jobs:
   # The release must not publish while the test gate is red.
   check:
     if: github.event_name == 'push'
-    uses: ./.github/workflows/checks.yml
+    uses: $/.github/workflows/checks.yml
 
   # build_command runs only during a release, so a broken one would surface on main
   # with the release already half done. Run it here against the version a release

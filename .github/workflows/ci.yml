@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   check:
-    uses: ./.github/workflows/checks.yml
+    uses: $/.github/workflows/checks.yml
 
   packages:
-    uses: ./.github/workflows/packages.yml
+    uses: $/.github/workflows/packages.yml

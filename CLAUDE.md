@@ -55,7 +55,15 @@ as a separate job in `checks.yml`.
 Project invariants that clippy cannot express live in `.opengrep/agentx-ifstack-rules.yaml`.
 Run `scripts/opengrep-scan.sh` to check the source and `scripts/opengrep-test.sh` to check
 the rules themselves. Every rule needs a fixture in `.opengrep/tests/`, which the packaging
-policy tests enforce. See `.opengrep/README.md` for why the filename matters.
+policy tests enforce.
+
+These run from a local pre-commit hook, never in CI: CodeRabbit skips its own opengrep pass
+when it sees opengrep in the workflows. Install with `pre-commit install --install-hooks`.
+The hooks are filtered so a commit touching neither `src/` nor the rules costs nothing. See
+`.opengrep/README.md` for that and for why the filename matters.
+
+`zizmor` audits the workflows themselves (permissions, injection, unpinned actions) in the
+`Workflow audit` CI job. Run it locally with `uvx --native-tls zizmor .github/workflows/`.
 
 `rust-toolchain.toml` pins the toolchain, but a `RUSTUP_TOOLCHAIN` environment variable
 overrides it. Check that variable before blaming a build failure on the code.
