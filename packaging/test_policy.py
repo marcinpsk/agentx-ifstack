@@ -84,6 +84,75 @@ def effective_permissions(owner, inherited):
     return dict(declared or {})
 
 
+def markdown_code_spans(path):
+    """Extract inline code and fenced blocks in document order."""
+    spans = []
+    prose = []
+    fenced = []
+    marker = None
+
+    def inline_spans():
+        spans.extend(match[2] for match in re.finditer(
+            r"(`+)(?!`)(.+?)(?<!`)\1(?!`)", "".join(prose), re.DOTALL
+        ))
+        prose.clear()
+
+    for line in path.read_text().splitlines(keepends=True):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\n"))
+        if marker is None:
+            if fence:
+                inline_spans()
+                marker = fence[1]
+            else:
+                prose.append(line)
+        elif (fence and fence[1][0] == marker[0]
+              and len(fence[1]) >= len(marker) and not fence[2].strip()):
+            spans.append("".join(fenced))
+            fenced.clear()
+            marker = None
+        else:
+            fenced.append(line)
+    assert marker is None, f"{path}: unclosed code fence"
+    inline_spans()
+    return spans
+
+
+def documented_shell_commands(path):
+    """Yield shell token lists, preserving quotes and splitting shell operators."""
+    shell_parts = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|\#[^\n]*|[;&|()\n]+""")
+    for span in markdown_code_spans(path):
+        span = span.replace("\\\n", "")
+        start = 0
+        for part in shell_parts.finditer(span):
+            if part[0][0] in ";&|()\n":
+                words = shlex.split(span[start:part.start()], comments=True)
+                if words:
+                    yield words
+                start = part.end()
+        words = shlex.split(span[start:], comments=True)
+        if words:
+            yield words
+
+
+def shell_options(arguments, value_options):
+    """Return positional tokens and ordered option/value pairs for a CLI schema."""
+    positional = []
+    options = []
+    words = iter(arguments)
+    for word in words:
+        if word == "--":
+            positional.extend(words)
+            break
+        if not word.startswith("-") or word == "-":
+            positional.append(word)
+            continue
+        option, equals, value = word.partition("=")
+        if not equals:
+            value = next(words, None) if option in value_options else None
+        options.append((option, value))
+    return positional, options
+
+
 class PackagingPolicyTests(unittest.TestCase):
     def test_releases_come_from_main_and_not_from_a_pushed_tag(self):
         """semantic-release creates the tag, so a tag trigger would double-fire."""
@@ -551,8 +620,7 @@ class PackagingPolicyTests(unittest.TestCase):
 
         invocations = []
         for name in ("CLAUDE.md", "README.md"):
-            for span in re.findall(r"`([^`]*zizmor[^`]*)`", (ROOT / name).read_text()):
-                words = shlex.split(span)
+            for words in documented_shell_commands(ROOT / name):
                 index = next(
                     (
                         position
@@ -568,7 +636,8 @@ class PackagingPolicyTests(unittest.TestCase):
 
         for name, words, index in invocations:
             arguments = words[index + 1 :]
-            paths = sorted(word for word in arguments if not word.startswith("-"))
+            paths, parsed = shell_options(arguments, {"--persona", "--collect"})
+            paths.sort()
             self.assertEqual(
                 paths,
                 expected_inputs,
@@ -576,11 +645,19 @@ class PackagingPolicyTests(unittest.TestCase):
                 f"but the CI job audits {expected_inputs}",
             )
             persona = "regular"
-            for position, word in enumerate(arguments):
-                if word.startswith("--persona="):
-                    persona = word.split("=", 1)[1]
-                elif word == "--persona" and position + 1 < len(arguments):
-                    persona = arguments[position + 1]
+            collection = []
+            for option, value in parsed:
+                if option == "--persona":
+                    persona = value
+                elif option in ("--pedantic", "-p"):
+                    persona = "pedantic"
+                elif option == "--collect":
+                    self.assertIsNotNone(value, "--collect requires a value")
+                    collection.extend(value.split(","))
+            self.assertEqual(
+                collection or ["default"], ["default"],
+                f"{name}: documented collection must match CI's default collection",
+            )
             self.assertEqual(
                 persona,
                 expected_persona,
@@ -771,13 +848,19 @@ class PackagingPolicyTests(unittest.TestCase):
         """
         documented = []
         for path in sorted((ROOT / "docs" / "agents").glob("*.md")):
-            for span in re.findall(r"`([^`]*--json[^`]*)`", path.read_text()):
-                command = re.search(r"\bgh\s+(\w[\w-]*)\s+(\w[\w-]*)", span)
-                fields = re.search(r"--json\s+([A-Za-z][A-Za-z,]*)", span)
-                if command and fields:
-                    documented.append(
-                        (path.name, command[1], command[2], fields[1].split(","))
-                    )
+            for words in documented_shell_commands(path):
+                if "gh" not in words:
+                    continue
+                arguments = words[words.index("gh") + 1:]
+                if len(arguments) < 2:
+                    continue
+                group, subcommand = arguments[:2]
+                _, options = shell_options(arguments[2:], {"--json"})
+                for option, value in options:
+                    if option == "--json" and value:
+                        documented.append(
+                            (path.name, group, subcommand, value.split(","))
+                        )
         self.assertTrue(documented, "expected documented gh --json commands")
 
         accepted = {}
@@ -965,11 +1048,63 @@ class GuardRegressionTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "audits"):
             self.policy.test_the_documented_zizmor_command_matches_ci()
 
+    def test_ticket_fetch_resolves_pr_before_issue(self):
+        document = (ROOT / "docs/agents/issue-tracker.md").read_text()
+        instruction = document.split('## When a skill says "fetch the relevant ticket"')[1]
+        instruction = instruction.split("##", 1)[0]
+        self.assertIn(
+            "gh pr view <number> --comments` and fall back to "
+            "`gh issue view <number> --comments", instruction,
+        )
+
+    def test_gh_json_guard_checks_complete_fields_in_every_command(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for addition, field in (
+            ('`gh issue view 1 --json=authorAssociation`', "authorAssociation"),
+            ('`gh issue view 1 --json "authorAssociation"`', "authorAssociation"),
+            ('`gh issue view 1 --json title_typo`', "title_typo"),
+            ('`gh issue view 1 --json \\\n authorAssociation`', "authorAssociation"),
+            ('```sh\ngh issue view 1 --json title\ngh issue view 1 --json authorAssociation\n```', "authorAssociation"),
+            ('~~~sh\ngh issue view 1 --json authorAssociation\n~~~', "authorAssociation"),
+            *(
+                (f'`gh issue view 1 --json title {operator} gh issue view 1 --json title_typo`', "title_typo")
+                for operator in (";", "&&", "||", "|", "&")
+            ),
+        ):
+            with self.subTest(addition=addition):
+                path.write_text(baseline + "\n" + addition + "\n")
+                with self.assertRaisesRegex(AssertionError, field):
+                    self.policy.test_documented_gh_json_fields_exist()
+
+    def test_zizmor_guard_checks_collection_and_persona_options(self):
+        path = ROOT / "CLAUDE.md"
+        baseline = path.read_text()
+        for option, expected in (
+            ("--collect=workflows", "collect"),
+            ('--collect "workflows"', "collect"),
+            ("--pedantic", "persona"),
+            ("-p", "persona"),
+        ):
+            with self.subTest(option=option):
+                path.write_text(baseline.replace(
+                    "uvx --native-tls zizmor .", f"uvx --native-tls zizmor {option} ."
+                ))
+                with self.assertRaisesRegex(AssertionError, expected):
+                    self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_zizmor_guard_checks_tilde_fences_in_another_document(self):
+        path = ROOT / "README.md"
+        path.write_text(path.read_text() +
+                        "\n~~~sh\nuvx --native-tls zizmor .github/workflows/\n~~~\n")
+        with self.assertRaisesRegex(AssertionError, "audits"):
+            self.policy.test_the_documented_zizmor_command_matches_ci()
+
     def test_external_pr_query_reads_later_pages(self):
         document = (ROOT / "docs/agents/issue-tracker.md").read_text()
-        command = shlex.split(re.search(
+        command = re.search(
             r'`(gh api "repos/<owner>/<repo>/pulls\?state=open"[^`]+)`', document
-        )[1])
+        )[1]
         pages = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -981,7 +1116,7 @@ class GuardRegressionTests(unittest.TestCase):
                         "number": number,
                         "title": "Example",
                         "user": {"login": "contributor"},
-                        "author_association": "MEMBER" if page == 1 else "CONTRIBUTOR",
+                        "author_association": "MEMBER" if number < 30 else "CONTRIBUTOR",
                     }
                     for number in (range(1, 31) if page == 1 else [31])
                 ]
@@ -1000,12 +1135,15 @@ class GuardRegressionTests(unittest.TestCase):
                 f"http://localhost:{server.server_port}"
                 "/repos/example/project/pulls?state=open"
             )
-            command[2] = endpoint
+            command = command.replace(
+                '"repos/<owner>/<repo>/pulls?state=open"', shlex.quote(endpoint)
+            )
             thread = threading.Thread(target=server.serve_forever)
             thread.start()
             try:
                 result = subprocess.run(
-                    command, capture_output=True, text=True, timeout=15, check=False,
+                    ["bash", "-o", "pipefail", "-c", command],
+                    capture_output=True, text=True, timeout=15, check=False,
                     env={
                         **os.environ,
                         "GH_TOKEN": "placeholder",
@@ -1018,14 +1156,50 @@ class GuardRegressionTests(unittest.TestCase):
                 server.shutdown()
                 thread.join()
         self.assertEqual(result.returncode, 0, result.stderr)
-        records = []
-        output = result.stdout.strip()
-        while output:
-            page, end = json.JSONDecoder().raw_decode(output)
-            records.extend(page)
-            output = output[end:].strip()
-        self.assertEqual([record["number"] for record in records], [31], result.stdout)
+        records = json.loads(result.stdout)
+        self.assertEqual([record["number"] for record in records], [30, 31], result.stdout)
         self.assertEqual(pages, [1, 2])
+
+    def test_external_pr_query_requires_pagination_and_one_json_value(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        baseline = path.read_text()
+        for old, new in (
+            ("--paginate --slurp", "--slurp"),
+            ("--paginate --slurp | jq '[.[][]", "--paginate --jq '[.[]"),
+        ):
+            with self.subTest(replacement=new):
+                self.assertIn(old, baseline)
+                path.write_text(baseline.replace(old, new))
+                with self.assertRaises((AssertionError, json.JSONDecodeError)):
+                    self.test_external_pr_query_reads_later_pages()
+
+    def test_documented_commands_preserve_valid_quotes_and_continuations(self):
+        path = ROOT / "docs/agents/issue-tracker.md"
+        path.write_text(
+            path.read_text() + '\n`gh issue view 1 --json="title,body"`\n'
+            '`gh issue view 1 --json "title,body"`\n'
+            '~~~sh\ngh issue view 1 --json \\\n title,body\n~~~\n'
+            '```sh\ngh issue view 1 --json title # fields\n'
+            'gh issue view 1 --json body\n```\n'
+        )
+        self.policy.test_documented_gh_json_fields_exist()
+        path = ROOT / "README.md"
+        path.write_text(path.read_text() +
+                        '\n~~~sh\nuvx --native-tls zizmor \\\n'
+                        ' --persona "regular" --collect=default .\n~~~\n')
+        self.policy.test_the_documented_zizmor_command_matches_ci()
+
+    def test_shell_commands_keep_quoted_operators_as_arguments(self):
+        path = ROOT / "commands.md"
+        path.write_text('````sh\ngh issue view 1 --json="title,body" '
+                        '--jq ".[] | .title"; printf "%s" "|"\n````\n')
+        commands = list(documented_shell_commands(path))
+        self.assertEqual(commands, [
+            ["gh", "issue", "view", "1", "--json=title,body", "--jq", ".[] | .title"],
+            ["printf", "%s", "|"],
+        ])
+        self.assertEqual(shell_options(commands[0][3:], {"--json", "--jq"}),
+                         (["1"], [("--json", "title,body"), ("--jq", ".[] | .title")]))
 
 
 if __name__ == "__main__":
