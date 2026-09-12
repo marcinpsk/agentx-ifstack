@@ -2,6 +2,47 @@
 
 <!-- version list -->
 
+## v0.1.0 (2026-09-12)
+
+### Bug Fixes
+
+- Fetch body in the frontier child query, and guard prose against command
+  ([`09139b9`](https://github.com/marcinpsk/agentx-ifstack/commit/09139b94fbb0b569c04d49abea21210a60fc7b8b))
+
+- Let a merge commit subject bump the version
+  ([`3e0dd61`](https://github.com/marcinpsk/agentx-ifstack/commit/3e0dd618a61d5ee4cd84a97f3dcc2064c517f270))
+
+- Parse documented commands once, and page the external-PR query correctly
+  ([`6819217`](https://github.com/marcinpsk/agentx-ifstack/commit/6819217724e63eeafc9b281fb0f08fa5b901a0fb))
+
+### Continuous Integration
+
+- Audit the whole repo with zizmor, and give Dependabot a cooldown
+  ([`6a503e5`](https://github.com/marcinpsk/agentx-ifstack/commit/6a503e556c151ad81fd38a8277bb7ae88127e1d1))
+
+- Move opengrep to a pre-commit hook and audit the workflows with zizmor
+  ([`c35b8bd`](https://github.com/marcinpsk/agentx-ifstack/commit/c35b8bdd42aff734af835d2d9202b8af34118ad7))
+
+### Documentation
+
+- Correct the gh commands in the issue tracker skill
+  ([`8db02c3`](https://github.com/marcinpsk/agentx-ifstack/commit/8db02c31e157c92bfafcf2de9682a530605a44f4))
+
+- Record the issue tracker, triage labels and domain doc layout
+  ([`c8b3a74`](https://github.com/marcinpsk/agentx-ifstack/commit/c8b3a7428082778bfae8a37135d4bb64eeb8fe5e))
+
+### Features
+
+- Record the issue tracker, triage labels and domain doc layout
+  ([#5](https://github.com/marcinpsk/agentx-ifstack/pull/5),
+  [`cab626f`](https://github.com/marcinpsk/agentx-ifstack/commit/cab626fd471ce9b7fd79e10af2dcd09c8f4c2845))
+
+### Testing
+
+- Check every documented gh --json field against the real CLI
+  ([`2e33899`](https://github.com/marcinpsk/agentx-ifstack/commit/2e338996adc3d8b2365bd88874da1f8d2442f807))
+
+
 ## v0.0.3 (2026-09-12)
 
 ### Bug Fixes

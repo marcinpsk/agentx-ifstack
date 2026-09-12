@@ -1,6 +1,6 @@
 [package]
 name = "agentx-ifstack"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2024"
 description = "AgentX subagent serving IF-MIB ifStackTable for Linux bonds, bridges and VLANs"
 license = "MIT OR Apache-2.0"
