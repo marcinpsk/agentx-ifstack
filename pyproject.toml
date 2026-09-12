@@ -30,3 +30,7 @@ allowed_tags = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "bui
 minor_tags = ["feat"]
 patch_tags = ["fix", "perf"]
 parse_squash_commits = true
+# Pull requests merge with merge_commit_title = PR_TITLE, so the conventional subject sits
+# on the merge commit. The default ignores merge commits, which dropped that subject: a
+# feat: merge released a patch. Measured on a scratch repo, default 0.1.1 against 0.2.0.
+ignore_merge_commits = false

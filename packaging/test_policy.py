@@ -115,6 +115,22 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertIs(release["major_on_zero"], False)
         self.assertIs(release["allow_zero_version"], True)
 
+    def test_a_merge_commit_subject_can_bump_the_version(self):
+        """Pull requests merge with merge_commit_title = PR_TITLE, so the conventional
+        subject lives on the merge commit. python-semantic-release ignores merge commits
+        by default, which silently drops that subject and bumps from the branch commits.
+
+        Measured on a scratch repository tagged v0.1.0, with a `fix:` on the branch and a
+        `feat:` merge subject: the default yields 0.1.1, this setting yields 0.2.0.
+        """
+        config = tomllib.loads((ROOT / "pyproject.toml").read_text())
+        parser = config["tool"]["semantic_release"]["commit_parser_options"]
+        self.assertIs(
+            parser.get("ignore_merge_commits"),
+            False,
+            "merge commits carry the conventional subject here, so they must be parsed",
+        )
+
     def test_the_release_uploads_both_package_formats(self):
         """`version` builds dist/ and creates the release but uploads nothing from it.
 
