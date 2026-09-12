@@ -2,6 +2,50 @@
 
 <!-- version list -->
 
+## v0.0.3 (2026-09-12)
+
+### Bug Fixes
+
+- Close three gaps in the guards added by this branch
+  ([`f513c62`](https://github.com/marcinpsk/agentx-ifstack/commit/f513c6230b2b263fb7869de3d69b269556c8b8c7))
+
+- Close three more gaps in this branch's own guards
+  ([`0988e38`](https://github.com/marcinpsk/agentx-ifstack/commit/0988e38e529cb3306d9cc7ff7cb536ea96cf3aa7))
+
+- Deny rustc warnings in the manifest, and reject a bare push trigger
+  ([`e5674a5`](https://github.com/marcinpsk/agentx-ifstack/commit/e5674a585aee1cee9b7dfdac7ac0f849aa33fc86))
+
+- Refuse an incomplete package set before the release exists
+  ([`ef6c4a7`](https://github.com/marcinpsk/agentx-ifstack/commit/ef6c4a733a49185bfc553ffccfa96f7dc158d5e2))
+
+- Write a Debian changelog trailer dpkg accepts
+  ([`4cf483b`](https://github.com/marcinpsk/agentx-ifstack/commit/4cf483ba2254086ac3ec97e2d24f694629e892db))
+
+### Chores
+
+- **deps**: Bump actions/checkout from 5.1.0 to 7.0.1
+  ([`4efa34b`](https://github.com/marcinpsk/agentx-ifstack/commit/4efa34b1bb11f29b698baabc4a2a3a9d4d7fa0ee))
+
+- **deps**: Bump actions/setup-python from 6.3.0 to 7.0.0
+  ([`05518c0`](https://github.com/marcinpsk/agentx-ifstack/commit/05518c082877b37985c1fb2f4cd34becc937e718))
+
+### Continuous Integration
+
+- Attach the packages to the release and gate the dependency tree
+  ([`2009362`](https://github.com/marcinpsk/agentx-ifstack/commit/20093625d4076a319deeb1e47055ea4a6129d8bc))
+
+- Gate the invariants clippy cannot express
+  ([`88f4f75`](https://github.com/marcinpsk/agentx-ifstack/commit/88f4f7502fe68a570df74869b5e44636ae755798))
+
+- Run the checks on pull requests only
+  ([`e052ad6`](https://github.com/marcinpsk/agentx-ifstack/commit/e052ad671078ddf7a8e7fcb0c7035db9255ccc40))
+
+### Testing
+
+- Apply the duplicate-run policy to .yaml workflows too
+  ([`00df513`](https://github.com/marcinpsk/agentx-ifstack/commit/00df5133195658bede6a41c6e1a6246561ef3fb8))
+
+
 ## v0.0.2 (2026-09-11)
 
 ### Bug Fixes
