@@ -705,6 +705,56 @@ class PackagingPolicyTests(unittest.TestCase):
             "call sync_parent before the early return, so a retry repairs a failed sync",
         )
 
+    def test_documented_gh_json_fields_exist(self):
+        """gh rejects an unknown --json field, so a wrong one makes the skill unusable.
+
+        `gh pr list --json authorAssociation` shipped here once and fails with
+        "Unknown JSON field". gh validates the names locally, before auth and before
+        any request, and an empty --json prints the accepted set for a subcommand.
+        """
+        documented = []
+        for path in sorted((ROOT / "docs" / "agents").glob("*.md")):
+            for span in re.findall(r"`([^`]*--json[^`]*)`", path.read_text()):
+                command = re.search(r"\bgh\s+(\w[\w-]*)\s+(\w[\w-]*)", span)
+                fields = re.search(r"--json\s+([A-Za-z][A-Za-z,]*)", span)
+                if command and fields:
+                    documented.append(
+                        (path.name, command[1], command[2], fields[1].split(","))
+                    )
+        self.assertTrue(documented, "expected documented gh --json commands")
+
+        accepted = {}
+        with tempfile.TemporaryDirectory() as config:
+            for _, group, subcommand, _fields in documented:
+                if (group, subcommand) in accepted:
+                    continue
+                probe = subprocess.run(
+                    ["gh", group, subcommand, "--json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                    env={**os.environ, "GH_TOKEN": "", "GH_CONFIG_DIR": config},
+                )
+                output = probe.stdout + probe.stderr
+                self.assertIn(
+                    "comma-separated fields",
+                    output,
+                    f"gh {group} {subcommand} --json did not list its fields: {output}",
+                )
+                accepted[(group, subcommand)] = {
+                    line.strip() for line in output.splitlines() if line.startswith("  ")
+                }
+
+        for name, group, subcommand, fields in documented:
+            for field in fields:
+                self.assertIn(
+                    field,
+                    accepted[(group, subcommand)],
+                    f"{name}: gh {group} {subcommand} has no --json field {field!r}",
+                )
+
+
 class GuardRegressionTests(unittest.TestCase):
     def setUp(self):
         global ROOT
