@@ -1,6 +1,8 @@
 mod config;
 mod link;
 mod mib;
+mod monitor;
+mod netlink;
 mod session;
 
 use std::path::Path;
@@ -33,10 +35,23 @@ fn main() -> ExitCode {
         }
     };
     init_logging(config.log_level.filter());
+    let tables = monitor::publication();
+    let monitor_tables = tables.clone();
+    let reconcile = Duration::from_secs(config.reconcile);
+    let _monitor = match std::thread::Builder::new()
+        .name("topology-monitor".to_owned())
+        .spawn(move || monitor::run(netlink::NetlinkSource::new(), &monitor_tables, reconcile))
+    {
+        Ok(monitor) => monitor,
+        Err(error) => {
+            log::error!("Cannot start topology monitor: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
-        match session::run(&config) {
+        match session::run(&config, &tables) {
             Ok(()) => log::warn!("AgentX master closed the session"),
             Err(error) => log::warn!("AgentX session ended: {error}"),
         }

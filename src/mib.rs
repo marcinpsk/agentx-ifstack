@@ -3,6 +3,8 @@ use std::ops::Bound;
 
 use agentx::encodings::{ID, SearchRange, SearchRangeList, Value, VarBind, VarBindList};
 
+use crate::link::Topology;
+
 pub const TABLE: [u32; 9] = [1, 3, 6, 1, 2, 1, 31, 1, 2];
 const STATUS: [u32; 11] = [1, 3, 6, 1, 2, 1, 31, 1, 2, 1, 3];
 const MAX_BULK_BINDINGS: usize = 4096;
@@ -10,7 +12,34 @@ const MAX_BULK_BINDINGS: usize = 4096;
 pub struct Mib(BTreeMap<ID, Value>);
 
 impl Mib {
-    pub fn new(rows: Vec<(u32, u32)>) -> Self {
+    pub fn from_topology(topology: &Topology) -> Self {
+        let mut rows: Vec<_> = topology
+            .relationships()
+            .iter()
+            .map(|relationship| (relationship.higher, relationship.lower))
+            .collect();
+        let higher: std::collections::BTreeSet<_> = topology
+            .relationships()
+            .iter()
+            .map(|relationship| relationship.higher)
+            .collect();
+        let lower: std::collections::BTreeSet<_> = topology
+            .relationships()
+            .iter()
+            .map(|relationship| relationship.lower)
+            .collect();
+        for index in topology.interfaces() {
+            if !lower.contains(index) {
+                rows.push((0, *index));
+            }
+            if !higher.contains(index) {
+                rows.push((*index, 0));
+            }
+        }
+        Self::from_rows(rows)
+    }
+
+    fn from_rows(rows: Vec<(u32, u32)>) -> Self {
         Self(
             rows.into_iter()
                 .map(|(higher, lower)| {
@@ -95,15 +124,37 @@ fn binding(name: &ID, data: Value) -> VarBind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::link::{LinkKind, ObservedLink};
     use std::str::FromStr;
 
     fn oid(suffix: &str) -> ID {
         ID::from_str(&format!("1.3.6.1.2.1.31.1.2.1.3{suffix}")).unwrap()
     }
 
+    fn table(rows: Vec<(u32, u32)>) -> Mib {
+        Mib::from_rows(rows)
+    }
+
+    #[test]
+    fn topology_relationships_and_missing_sides_become_table_rows() {
+        let topology = Topology::from_observed(vec![
+            ObservedLink::plain(2, "member").with_controller(10),
+            ObservedLink::of_kind(10, "bond", LinkKind::Bond),
+            ObservedLink::plain(20, "standalone"),
+        ])
+        .unwrap();
+        let mib = Mib::from_topology(&topology);
+
+        for suffix in [".0.10", ".0.20", ".2.0", ".10.2", ".20.0"] {
+            assert_eq!(mib.get(&oid(suffix)).data, Value::Integer(1));
+        }
+        assert_eq!(mib.get(&oid(".0.2")).data, Value::NoSuchInstance);
+        assert_eq!(mib.get(&oid(".10.0")).data, Value::NoSuchInstance);
+    }
+
     #[test]
     fn get_distinguishes_missing_instances_and_objects() {
-        let mib = Mib::new(vec![(2, 10)]);
+        let mib = table(vec![(2, 10)]);
         assert_eq!(mib.get(&oid(".2.10")).data, Value::Integer(1));
         for suffix in ["", ".2", ".2.11", ".2.10.0"] {
             assert_eq!(mib.get(&oid(suffix)).data, Value::NoSuchInstance);
@@ -121,7 +172,7 @@ mod tests {
 
     #[test]
     fn walk_uses_numeric_components_and_terminates() {
-        let mib = Mib::new(vec![(10, 2), (2, 10), (2, 2)]);
+        let mib = table(vec![(10, 2), (2, 10), (2, 2)]);
         let mut range = SearchRange::new(oid(""), ID::default());
         for suffix in [".2.2", ".2.10", ".10.2"] {
             let next = mib.get_next(&range);
@@ -137,7 +188,7 @@ mod tests {
 
     #[test]
     fn next_honors_inclusive_start_and_exclusive_end() {
-        let mib = Mib::new(vec![(2, 2), (2, 10)]);
+        let mib = table(vec![(2, 2), (2, 10)]);
         let mut start = oid(".2.2");
         start.include = 1;
         let next = mib.get_next(&SearchRange::new(start.clone(), oid(".2.10")));
@@ -152,7 +203,7 @@ mod tests {
             let result = mib.get_next(&SearchRange::new(start.clone(), end));
             assert_eq!(result, VarBind::new(start, Value::EndOfMibView));
         }
-        let empty = Mib::new(vec![]);
+        let empty = table(vec![]);
         assert_eq!(
             empty.get_next(&SearchRange::default()).data,
             Value::EndOfMibView
@@ -161,7 +212,7 @@ mod tests {
 
     #[test]
     fn bulk_interleaves_repeaters_and_keeps_exhausted_names() {
-        let mib = Mib::new(vec![(2, 2), (2, 10), (10, 2)]);
+        let mib = table(vec![(2, 2), (2, 10), (10, 2)]);
         let mut inclusive = oid(".2.2");
         inclusive.include = 1;
         let ranges = SearchRangeList(vec![
@@ -189,7 +240,7 @@ mod tests {
 
     #[test]
     fn bulk_bounds_response_growth() {
-        let mib = Mib::new((1..10000).map(|i| (i, 0)).collect());
+        let mib = table((1..10000).map(|i| (i, 0)).collect());
         assert_eq!(
             mib.get_bulk(SearchRangeList(vec![SearchRange::default()]), 0, u16::MAX)
                 .len(),

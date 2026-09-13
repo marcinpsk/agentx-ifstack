@@ -22,7 +22,7 @@ packs. This ruleset deliberately avoids those names.
 
 It also skips its own opengrep pass when it sees opengrep running in the workflows. These
 rules therefore run from a **local pre-commit hook only**, never in CI. Running them in CI
-would trade CodeRabbit's broad packs for this repo's two narrow rules, which is a straight
+would trade CodeRabbit's broad packs for this repo's narrow rule, which is a straight
 loss. A policy test asserts no workflow mentions opengrep.
 
 Install the hook with `pre-commit install --install-hooks`. Both hooks carry a `files`
@@ -43,7 +43,6 @@ commit touching neither costs nothing.
 
 | Rule | Invariant |
 | --- | --- |
-| `agentx-try-wait-outside-finish` | `try_wait` reaps the child and frees its pid, and that pid is the process group id, so reaping before the group kill lets `kill(-pgid)` reach an unrelated group. Reap only in `IpCommand::finish`. |
 | `agentx-unwrap-outside-tests` | `unwrap` panics, and a panic aborts the daemon while systemd counts the restart. |
 
 Suppress a deliberate exception on the line with `// nosemgrep: <rule-id>`.

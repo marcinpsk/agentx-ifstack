@@ -781,7 +781,7 @@ class PackagingPolicyTests(unittest.TestCase):
         )
 
     def test_real_namespace_ci_uses_a_compatible_iproute_userspace(self):
-        """The runner kernel can outrun Ubuntu's iproute2 and break VXLAN JSON."""
+        """Use one current iproute2 to create every real-interface fixture."""
         step = next(
             step
             for job in workflow("checks.yml")["jobs"].values()
@@ -916,22 +916,36 @@ class PackagingPolicyTests(unittest.TestCase):
                 f"but the CI job uses {expected_persona}",
             )
 
-    def test_agent_guidance_defers_to_confirmed_topology_contract(self):
-        """Current runtime details must not override the confirmed replacement."""
+    def test_agent_guidance_describes_the_netlink_topology_contract(self):
+        """Future changes must start from the implemented monitor boundaries."""
         guidance = (ROOT / "CLAUDE.md").read_text()
         configuration = guidance.split("## Configuration and packages", 1)[1]
         configuration = configuration.split("## Build and test", 1)[0]
         for requirement in (
             "docs/adr/0001-monitor-topology-independently-of-agentx.md",
-            "takes precedence",
-            "`reconcile`",
-            "process-lifetime netlink monitor",
+            "docs/adr/0002-implement-the-netlink-monitor-as-a-process-actor.md",
+            "socket, reconcile, priority, and log_level",
         ):
             self.assertIn(requirement, configuration)
 
         data_source = guidance.split("## Data source", 1)[1]
         data_source = data_source.split("## AgentX constraints", 1)[0]
-        self.assertIn("Legacy implementation only", data_source)
+        self.assertIn("typed route-netlink messages", data_source)
+        self.assertIn("`NLMSG_DONE`", data_source)
+
+    def test_runtime_package_and_service_do_not_depend_on_iproute(self):
+        """The test harness can use ip, but the installed daemon does not."""
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
+        deb = manifest["package"]["metadata"]["deb"]
+        rpm = manifest["package"]["metadata"]["generate-rpm"]
+        self.assertNotIn("iproute", deb.get("depends", ""))
+        self.assertNotIn("iproute", rpm.get("requires", {}))
+        unit = (ROOT / "packaging/agentx-ifstack.service").read_text()
+        self.assertNotIn("Environment=PATH=", unit)
+
+        shipped = tomllib.loads((ROOT / "packaging/agentx-ifstack.toml").read_text())
+        self.assertEqual(shipped["reconcile"], 3600)
+        self.assertNotIn("refresh", shipped)
 
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.

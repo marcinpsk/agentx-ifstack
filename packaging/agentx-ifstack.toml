@@ -1,8 +1,8 @@
 # AgentX master Unix socket.
 socket = "/var/agentx/master"
 
-# Seconds to cache interface topology, at least 1.
-refresh = 5
+# Seconds between background complete inventories, at least 1.
+reconcile = 3600
 
 # AgentX registration priority, from 1 to 255; lower values win.
 priority = 127
