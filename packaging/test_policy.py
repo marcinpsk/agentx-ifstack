@@ -712,6 +712,23 @@ class PackagingPolicyTests(unittest.TestCase):
                 f"but the CI job uses {expected_persona}",
             )
 
+    def test_agent_guidance_defers_to_confirmed_topology_contract(self):
+        """Current runtime details must not override the confirmed replacement."""
+        guidance = (ROOT / "CLAUDE.md").read_text()
+        configuration = guidance.split("## Configuration and packages", 1)[1]
+        configuration = configuration.split("## Build and test", 1)[0]
+        for requirement in (
+            "docs/adr/0001-monitor-topology-independently-of-agentx.md",
+            "takes precedence",
+            "`reconcile`",
+            "process-lifetime netlink monitor",
+        ):
+            self.assertIn(requirement, configuration)
+
+        data_source = guidance.split("## Data source", 1)[1]
+        data_source = data_source.split("## AgentX constraints", 1)[0]
+        self.assertIn("Legacy implementation only", data_source)
+
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.
 
