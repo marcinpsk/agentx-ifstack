@@ -14,7 +14,14 @@ AgentX and refresh I/O, and `main.rs` supervises reconnection.
 
 ## Configuration and packages
 
-Keep the configuration limited to socket, refresh, priority, and log_level.
+For issue #8 topology-monitor work, follow the
+[confirmed ADR](docs/adr/0001-monitor-topology-independently-of-agentx.md).
+It takes precedence over the current runtime details below. The replacement
+uses a `reconcile` interval and one process-lifetime netlink monitor. It removes
+the `refresh` setting and the `ip` subprocess path in the same change.
+
+Keep the legacy runtime configuration limited to socket, refresh, priority,
+and log_level.
 An absent default file is allowed. An explicit missing file or invalid file
 must fail before the supervise loop. Tests use real temporary files and the
 actual binary with an AgentX UnixListener.
@@ -96,8 +103,8 @@ relationships separately from boundary rows.
 
 ## Data source
 
-`ip -details -json link show` supplies every relationship needed. Prefer parsing that
-JSON over `/sys/class/net` traversal.
+Legacy implementation only: `ip -details -json link show` supplies every
+relationship needed. Prefer parsing that JSON over `/sys/class/net` traversal.
 
 | field | meaning |
 |---|---|
