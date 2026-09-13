@@ -32,6 +32,20 @@ ROOT = Path(__file__).resolve().parent.parent
 PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 MKTEMP = re.compile(r"\bmktemp\b")
 PREDICTABLE_TEMP = re.compile(r"(?:/tmp(?:/|\b)|\$\{?TMPDIR\}?/)")
+SHELL_PART = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|\#[^\n]*|[;&|()\n]+""")
+REAL_NAMESPACE_CARGO = ["CARGO=$(command -v cargo)"]
+REAL_NAMESPACE_TEST = [
+    "sudo",
+    "env",
+    "HOME=$HOME",
+    "$CARGO",
+    "test",
+    "--locked",
+    "--test",
+    "real_namespace",
+    "--",
+    "--ignored",
+]
 
 
 def manifest_version():
@@ -119,21 +133,33 @@ def markdown_code_spans(path):
     return spans
 
 
+def shell_commands(text):
+    """Yield shell token lists while splitting shell operators."""
+    text = text.replace("\\\n", "")
+    start = 0
+    for part in SHELL_PART.finditer(text):
+        if part[0][0] in ";&|()\n":
+            words = shlex.split(text[start:part.start()], comments=True)
+            if words:
+                yield words
+            start = part.end()
+    words = shlex.split(text[start:], comments=True)
+    if words:
+        yield words
+
+
 def documented_shell_commands(path):
-    """Yield shell token lists, preserving quotes and splitting shell operators."""
-    shell_parts = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|\#[^\n]*|[;&|()\n]+""")
+    """Yield shell token lists from Markdown code spans."""
     for span in markdown_code_spans(path):
-        span = span.replace("\\\n", "")
-        start = 0
-        for part in shell_parts.finditer(span):
-            if part[0][0] in ";&|()\n":
-                words = shlex.split(span[start:part.start()], comments=True)
-                if words:
-                    yield words
-                start = part.end()
-        words = shlex.split(span[start:], comments=True)
-        if words:
-            yield words
+        yield from shell_commands(span)
+
+
+def runs_real_namespace_suite(step):
+    """Return whether a workflow step resolves and executes the required Cargo test."""
+    return list(shell_commands(str(step.get("run", "")))) == [
+        REAL_NAMESPACE_CARGO,
+        REAL_NAMESPACE_TEST,
+    ]
 
 
 @functools.cache
@@ -649,12 +675,11 @@ class PackagingPolicyTests(unittest.TestCase):
 
     def test_ci_runs_the_real_namespace_agentx_suite(self):
         """The privileged suite must not disappear behind Cargo's ignored-test default."""
-        required = "cargo test --locked --test real_namespace -- --ignored"
         executions = [
             (job, step)
             for job in workflow("checks.yml")["jobs"].values()
             for step in job.get("steps", [])
-            if required in str(step.get("run", ""))
+            if runs_real_namespace_suite(step)
         ]
         self.assertTrue(executions, "CI does not run the real namespace AgentX suite")
         self.assertTrue(
@@ -674,6 +699,41 @@ class PackagingPolicyTests(unittest.TestCase):
             for step in job.get("steps", [])
         )
         self.assertIn("iproute2", commands, "CI does not install iproute2")
+
+    def test_real_namespace_command_resolves_cargo_before_sudo(self):
+        """sudo can replace PATH, so invoke the Cargo binary resolved by the caller."""
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Test AgentX against real network namespaces"
+        )
+        run = str(step.get("run", ""))
+        self.assertIn('CARGO="$(command -v cargo)"', run)
+        self.assertIn(
+            'sudo env HOME="$HOME" "$CARGO" test --locked --test '
+            "real_namespace -- --ignored",
+            run,
+        )
+        self.assertNotIn("--preserve-env=PATH", run)
+
+        documented = list(documented_shell_commands(ROOT / "README.md"))
+        self.assertIn(["CARGO=$(command -v cargo)"], documented)
+        self.assertIn(
+            [
+                "sudo",
+                "env",
+                "HOME=$HOME",
+                "$CARGO",
+                "test",
+                "--locked",
+                "--test",
+                "real_namespace",
+                "--",
+                "--ignored",
+            ],
+            documented,
+        )
 
     def test_the_documented_zizmor_command_matches_ci(self):
         """A narrower local command passes while CI fails.
@@ -1109,7 +1169,6 @@ class GuardRegressionTests(unittest.TestCase):
     def test_real_namespace_guard_rejects_disabled_or_nonblocking_execution(self):
         path = ROOT / ".github/workflows/checks.yml"
         baseline = path.read_text()
-        required = "cargo test --locked --test real_namespace -- --ignored"
         for owner, field, value in (
             ("job", "if", "false"),
             ("step", "if", "${{ false }}"),
@@ -1122,7 +1181,7 @@ class GuardRegressionTests(unittest.TestCase):
                 def change(data, owner=owner, field=field, value=value):
                     job = data["jobs"]["check"]
                     step = next(
-                        step for step in job["steps"] if required in step.get("run", "")
+                        step for step in job["steps"] if runs_real_namespace_suite(step)
                     )
                     target = job if owner == "job" else step
                     target[field] = value
@@ -1130,6 +1189,21 @@ class GuardRegressionTests(unittest.TestCase):
                 self.mutate(".github/workflows/checks.yml", change)
                 with self.assertRaises(AssertionError):
                     self.policy.test_ci_runs_the_real_namespace_agentx_suite()
+
+    def test_real_namespace_guard_rejects_an_echo_decoy(self):
+        required = "cargo test --locked --test real_namespace -- --ignored"
+
+        def change(data):
+            job = data["jobs"]["check"]
+            step = next(
+                step for step in job["steps"] if runs_real_namespace_suite(step)
+            )
+            step["if"] = "${{ false }}"
+            job["steps"].append({"run": f"echo {required}"})
+
+        self.mutate(".github/workflows/checks.yml", change)
+        with self.assertRaises(AssertionError):
+            self.policy.test_ci_runs_the_real_namespace_agentx_suite()
 
     def test_gh_json_guard_rejects_a_field_the_cli_lacks(self):
         document = ROOT / "docs/agents/issue-tracker.md"

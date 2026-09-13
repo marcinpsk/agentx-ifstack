@@ -185,8 +185,18 @@ fn create_complete_topology() -> BTreeMap<String, u32> {
     ip(&[
         "link", "add", "link", "lower0", "name", "macvlan0", "type", "macvlan", "mode", "bridge",
     ]);
+    ip(&["link", "add", "ipvlanlower", "type", "dummy"]);
     ip(&[
-        "link", "add", "link", "lower0", "name", "ipvlan0", "type", "ipvlan", "mode", "l2",
+        "link",
+        "add",
+        "link",
+        "ipvlanlower",
+        "name",
+        "ipvlan0",
+        "type",
+        "ipvlan",
+        "mode",
+        "l2",
     ]);
     ip(&[
         "link", "add", "link", "lower0", "name", "macvtap0", "type", "macvtap", "mode", "bridge",
@@ -427,7 +437,7 @@ fn real_interfaces_produce_direct_and_boundary_rows() {
         (indices["vlan0"], indices["bond0"]),
         (indices["bridge0"], indices["bridgemember"]),
         (indices["macvlan0"], indices["lower0"]),
-        (indices["ipvlan0"], indices["lower0"]),
+        (indices["ipvlan0"], indices["ipvlanlower"]),
         (indices["macvtap0"], indices["lower0"]),
         (indices["vxlan0"], indices["lower0"]),
     ]);

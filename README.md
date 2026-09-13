@@ -246,7 +246,8 @@ The normal `cargo test` command compiles but does not run the privileged
 real-interface suite. On Linux, install `iproute2` and run that suite with:
 
 ```bash
-sudo --preserve-env=PATH env HOME="$HOME" cargo test --locked --test real_namespace -- --ignored
+CARGO="$(command -v cargo)"
+sudo env HOME="$HOME" "$CARGO" test --locked --test real_namespace -- --ignored
 ```
 
 Each test creates a network namespace, temporary configuration, AgentX Unix
