@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
+use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -45,11 +46,10 @@ impl Master {
             socket.clone()
         };
         let config_path = directory.path().join("config.toml");
-        fs::write(
+        write_subagent_config(
             &config_path,
             format!("socket = {configured_socket:?}\n{config}"),
-        )
-        .expect("write AgentX test config");
+        );
 
         let executable = directory.path().join("agentx-ifstack");
         fs::copy(env!("CARGO_BIN_EXE_agentx-ifstack"), &executable)
@@ -96,6 +96,12 @@ impl Master {
     }
 }
 
+fn write_subagent_config(path: &Path, config: String) {
+    fs::write(path, config).expect("write AgentX test config");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o444))
+        .expect("make AgentX test config readable by the subagent user");
+}
+
 impl Drop for Master {
     fn drop(&mut self) {
         // Drop runs during assertion unwinding. Do not hide the first failure.
@@ -114,6 +120,28 @@ impl Drop for Master {
 struct LinkIndex {
     ifindex: u32,
     ifname: String,
+}
+
+#[test]
+fn subagent_config_is_readable_after_restrictive_creation() {
+    let directory = TempDir::new().expect("create test directory");
+    let config = directory.path().join("config.toml");
+    fs::write(&config, "").expect("create restrictive config");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600))
+        .expect("restrict initial config permissions");
+
+    write_subagent_config(&config, "socket = \"/tmp/master\"\n".to_owned());
+
+    let mode = fs::metadata(config)
+        .expect("read config metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_ne!(
+        mode & 0o004,
+        0,
+        "test config mode {mode:o} is not readable by the subagent user"
+    );
 }
 
 fn enter_network_namespace() {
