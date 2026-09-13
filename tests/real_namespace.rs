@@ -29,8 +29,21 @@ struct Master {
     child: Child,
 }
 
+enum ProcessIdentity {
+    Unprivileged,
+    TestProcess,
+}
+
 impl Master {
     fn start(config: &str, socket_override: bool) -> Self {
+        Self::start_with_identity(config, socket_override, ProcessIdentity::Unprivileged)
+    }
+
+    fn start_as_test_process(config: &str) -> Self {
+        Self::start_with_identity(config, false, ProcessIdentity::TestProcess)
+    }
+
+    fn start_with_identity(config: &str, socket_override: bool, identity: ProcessIdentity) -> Self {
         let directory = tempfile::Builder::new()
             .prefix("ifstack-real-")
             .tempdir()
@@ -61,11 +74,10 @@ impl Master {
         if socket_override {
             command.arg("--socket").arg(&socket);
         }
-        let child = command
-            .uid(TEST_UID)
-            .gid(TEST_GID)
-            .spawn()
-            .expect("start agentx-ifstack as an unprivileged user");
+        if matches!(identity, ProcessIdentity::Unprivileged) {
+            command.uid(TEST_UID).gid(TEST_GID);
+        }
+        let child = command.spawn().expect("start agentx-ifstack test process");
         Self {
             _directory: directory,
             agentx,
@@ -749,7 +761,10 @@ fn process_reregisters_after_close_and_socket_loss() {
 #[ignore = "requires root, iproute2, and network namespace permission"]
 fn repeated_events_and_agentx_reconnects_keep_resources_bounded() {
     enter_network_namespace();
-    let master = Master::start("reconcile = 3600\n", false);
+    // This test must share an identity with the daemon to inspect /proc without
+    // adding CAP_SYS_PTRACE to the hardened CI container. Other tests prove the
+    // production binary runs under an unprivileged identity.
+    let master = Master::start_as_test_process("reconcile = 3600\n");
     let mut stream = master.connect(NETWORK_ORDER, 100);
     let loopback = interface_indices()["lo"];
     assert_eq!(
