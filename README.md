@@ -242,20 +242,30 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+The normal `cargo test` command compiles but does not run the privileged
+real-interface suite. On Linux, install `iproute2` and run that suite with:
+
+```bash
+sudo --preserve-env=PATH env HOME="$HOME" cargo test --locked --test real_namespace -- --ignored
+```
+
+Each test creates a network namespace, temporary configuration, AgentX Unix
+socket, and subagent process. The tests discover the kernel-assigned interface
+indices. They fail if `iproute2`, root access, or network namespace permission
+is missing. Sandboxes that deny `unshare(CLONE_NEWNET)` cannot run this suite.
+CI invokes it explicitly and treats missing prerequisites as a failure.
+
 `python3 packaging/test_policy.py` checks the release gate, push triggers, and
 service restart policy. It requires PyYAML 6.0.3, pre-commit 4.5.1, `gh`, `jq`, and Bash.
 The shared checks workflow runs it.
 
-`tests/session.rs` runs the actual binary against a UnixListener. The master
-uses real AgentX PDUs. A fixture executable supplies `ip` output without
-changing host interfaces. Tests cover both byte orders, reads, bulk walks,
-write rejection, cache refresh, errors, Close, and reconnect after socket
-loss. Configuration tests use real temporary files. Wire tests prove that the
-configured socket, priority, and refresh interval take effect and that the CLI
-socket overrides the file. Raw wire tests cover oversized OIDs at both SearchRange ends and in
-TestSet names and OID values. They check `parseError`, process survival, and
-a normal GET on the same connection. Pure tests cover topology fixtures and
-OID boundaries.
+`tests/real_namespace.rs` runs the actual binary against a UnixListener and
+real isolated Linux interfaces. It covers both byte orders, reads, bulk walks,
+write rejection, refresh, Close, reconnect after socket loss, configuration,
+and the request OID limit. It asserts direct relationships separately from
+zero-index boundary rows. `tests/session.rs` keeps fixture executables only for
+the current `ip` subprocess lifecycle, timeout, cleanup, and output-limit
+behavior. Pure tests cover parser edge cases and MIB boundaries.
 
 `tests/fixtures/proxmox.json` preserves the relationship fields from the
 collected Proxmox capture. Interface names are replaced with `port<index>`.

@@ -19,6 +19,12 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Install real namespace test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes iproute2
+      - name: Test AgentX against real network namespaces
+        run: sudo --preserve-env=PATH env HOME="$HOME" cargo test --locked --test real_namespace -- --ignored
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'

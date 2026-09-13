@@ -647,6 +647,34 @@ class PackagingPolicyTests(unittest.TestCase):
             "zizmor must run without conditions and propagate failures",
         )
 
+    def test_ci_runs_the_real_namespace_agentx_suite(self):
+        """The privileged suite must not disappear behind Cargo's ignored-test default."""
+        required = "cargo test --locked --test real_namespace -- --ignored"
+        executions = [
+            (job, step)
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if required in str(step.get("run", ""))
+        ]
+        self.assertTrue(executions, "CI does not run the real namespace AgentX suite")
+        self.assertTrue(
+            any(
+                "if" not in job
+                and "if" not in step
+                and job.get("continue-on-error", "false") == "false"
+                and step.get("continue-on-error", "false") == "false"
+                for job, step in executions
+            ),
+            "the real namespace AgentX suite must run and propagate failures",
+        )
+
+        commands = "\n".join(
+            str(step.get("run", ""))
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertIn("iproute2", commands, "CI does not install iproute2")
+
     def test_the_documented_zizmor_command_matches_ci(self):
         """A narrower local command passes while CI fails.
 
@@ -1077,6 +1105,31 @@ class GuardRegressionTests(unittest.TestCase):
                 self.mutate(".github/workflows/checks.yml", change)
                 with self.assertRaises(AssertionError):
                     self.policy.test_the_workflows_are_audited_by_zizmor()
+
+    def test_real_namespace_guard_rejects_disabled_or_nonblocking_execution(self):
+        path = ROOT / ".github/workflows/checks.yml"
+        baseline = path.read_text()
+        required = "cargo test --locked --test real_namespace -- --ignored"
+        for owner, field, value in (
+            ("job", "if", "false"),
+            ("step", "if", "${{ false }}"),
+            ("job", "continue-on-error", True),
+            ("step", "continue-on-error", True),
+        ):
+            with self.subTest(owner=owner, field=field, value=value):
+                path.write_text(baseline)
+
+                def change(data, owner=owner, field=field, value=value):
+                    job = data["jobs"]["check"]
+                    step = next(
+                        step for step in job["steps"] if required in step.get("run", "")
+                    )
+                    target = job if owner == "job" else step
+                    target[field] = value
+
+                self.mutate(".github/workflows/checks.yml", change)
+                with self.assertRaises(AssertionError):
+                    self.policy.test_ci_runs_the_real_namespace_agentx_suite()
 
     def test_gh_json_guard_rejects_a_field_the_cli_lacks(self):
         document = ROOT / "docs/agents/issue-tracker.md"
