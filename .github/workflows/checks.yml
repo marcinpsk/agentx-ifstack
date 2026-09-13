@@ -43,7 +43,7 @@ jobs:
           docker run --rm \
             --network none \
             --read-only \
-            --tmpfs /tmp:rw,nosuid,nodev \
+            --tmpfs /tmp:rw,nosuid,nodev,exec \
             --cap-drop ALL \
             --cap-add SYS_ADMIN \
             --cap-add NET_ADMIN \

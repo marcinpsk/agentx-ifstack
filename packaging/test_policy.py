@@ -63,7 +63,7 @@ REAL_NAMESPACE_DOCKER = [
     "none",
     "--read-only",
     "--tmpfs",
-    "/tmp:rw,nosuid,nodev",
+    "/tmp:rw,nosuid,nodev,exec",
     "--cap-drop",
     "ALL",
     "--cap-add",
@@ -840,6 +840,7 @@ class PackagingPolicyTests(unittest.TestCase):
         for option in (
             "--network none",
             "--read-only",
+            "--tmpfs /tmp:rw,nosuid,nodev,exec",
             "--cap-drop ALL",
             "--cap-add SYS_ADMIN",
             "--cap-add NET_ADMIN",
