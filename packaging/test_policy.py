@@ -33,18 +33,88 @@ PINNED_ACTION = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 MKTEMP = re.compile(r"\bmktemp\b")
 PREDICTABLE_TEMP = re.compile(r"(?:/tmp(?:/|\b)|\$\{?TMPDIR\}?/)")
 SHELL_PART = re.compile(r"""'[^']*'|"(?:\\.|[^"\\])*"|\\.|\#[^\n]*|[;&|()\n]+""")
-REAL_NAMESPACE_CARGO = ["CARGO=$(command -v cargo)"]
-REAL_NAMESPACE_TEST = [
-    "sudo",
-    "env",
-    "HOME=$HOME",
-    "$CARGO",
-    "test",
-    "--locked",
-    "--test",
-    "real_namespace",
-    "--",
+REAL_NAMESPACE_JQ = """
+  [
+    .[]
+    | select(
+        .reason == "compiler-artifact"
+        and .target.kind == ["test"]
+        and .target.name == "real_namespace"
+        and .executable != null
+      )
+    | .executable
+  ]
+  | if length == 1 then .[0] else error("expected one real_namespace test artifact") end
+"""
+REAL_NAMESPACE_IMAGE = [
+    "docker",
+    "build",
+    "--tag",
+    "agentx-ifstack-real-namespace",
+    "--file",
+    ".github/real-namespace.Dockerfile",
+    ".github",
+]
+REAL_NAMESPACE_DOCKER = [
+    "docker",
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev",
+    "--cap-drop",
+    "ALL",
+    "--cap-add",
+    "SYS_ADMIN",
+    "--cap-add",
+    "NET_ADMIN",
+    "--cap-add",
+    "SETUID",
+    "--cap-add",
+    "SETGID",
+    "--cap-add",
+    "KILL",
+    "--security-opt",
+    "no-new-privileges",
+    "--entrypoint",
+    "$TEST_BINARY",
+    "--volume",
+    "$PWD:$PWD:ro",
+    "--workdir",
+    "$PWD",
+    "agentx-ifstack-real-namespace",
     "--ignored",
+]
+REAL_NAMESPACE_COMMANDS = [
+    ["ARTIFACTS=$RUNNER_TEMP/real-namespace-artifacts.json"],
+    ["BINARY_PATH=$RUNNER_TEMP/real-namespace-binary"],
+    [
+        "cargo",
+        "test",
+        "--locked",
+        "--test",
+        "real_namespace",
+        "--no-run",
+        "--message-format=json",
+        ">",
+        "$ARTIFACTS",
+    ],
+    [
+        "jq",
+        "--slurp",
+        "--raw-output",
+        "--exit-status",
+        REAL_NAMESPACE_JQ,
+        "$ARTIFACTS",
+        ">",
+        "$BINARY_PATH",
+    ],
+    ["IFS=", "read", "-r", "TEST_BINARY", "<", "$BINARY_PATH"],
+    ["test", "-x", "$TEST_BINARY"],
+    REAL_NAMESPACE_IMAGE,
+    REAL_NAMESPACE_DOCKER,
 ]
 
 
@@ -155,11 +225,8 @@ def documented_shell_commands(path):
 
 
 def runs_real_namespace_suite(step):
-    """Return whether a workflow step resolves and executes the required Cargo test."""
-    return list(shell_commands(str(step.get("run", "")))) == [
-        REAL_NAMESPACE_CARGO,
-        REAL_NAMESPACE_TEST,
-    ]
+    """Return whether a workflow step runs the suite with a compatible iproute2."""
+    return list(shell_commands(str(step.get("run", "")))) == REAL_NAMESPACE_COMMANDS
 
 
 @functools.cache
@@ -674,7 +741,7 @@ class PackagingPolicyTests(unittest.TestCase):
         )
 
     def test_ci_runs_the_real_namespace_agentx_suite(self):
-        """The privileged suite must not disappear behind Cargo's ignored-test default."""
+        """The namespace suite must not disappear behind Cargo's ignored-test default."""
         executions = [
             (job, step)
             for job in workflow("checks.yml")["jobs"].values()
@@ -693,30 +760,8 @@ class PackagingPolicyTests(unittest.TestCase):
             "the real namespace AgentX suite must run and propagate failures",
         )
 
-        commands = "\n".join(
-            str(step.get("run", ""))
-            for job in workflow("checks.yml")["jobs"].values()
-            for step in job.get("steps", [])
-        )
-        self.assertIn("iproute2", commands, "CI does not install iproute2")
-
-    def test_real_namespace_command_resolves_cargo_before_sudo(self):
+    def test_documented_real_namespace_command_resolves_cargo_before_sudo(self):
         """sudo can replace PATH, so invoke the Cargo binary resolved by the caller."""
-        step = next(
-            step
-            for job in workflow("checks.yml")["jobs"].values()
-            for step in job.get("steps", [])
-            if step.get("name") == "Test AgentX against real network namespaces"
-        )
-        run = str(step.get("run", ""))
-        self.assertIn('CARGO="$(command -v cargo)"', run)
-        self.assertIn(
-            'sudo env HOME="$HOME" "$CARGO" test --locked --test '
-            "real_namespace -- --ignored",
-            run,
-        )
-        self.assertNotIn("--preserve-env=PATH", run)
-
         documented = list(documented_shell_commands(ROOT / "README.md"))
         self.assertIn(["CARGO=$(command -v cargo)"], documented)
         self.assertIn(
@@ -734,6 +779,76 @@ class PackagingPolicyTests(unittest.TestCase):
             ],
             documented,
         )
+
+    def test_real_namespace_ci_uses_a_compatible_iproute_userspace(self):
+        """The runner kernel can outrun Ubuntu's iproute2 and break VXLAN JSON."""
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Test AgentX against real network namespaces"
+        )
+        run = str(step.get("run", ""))
+        commands = list(shell_commands(run))
+        image_build = next(
+            (
+                words
+                for words in commands
+                if words[:3] == ["docker", "build", "--tag"]
+            ),
+            None,
+        )
+        self.assertEqual(
+            image_build,
+            [
+                "docker",
+                "build",
+                "--tag",
+                "agentx-ifstack-real-namespace",
+                "--file",
+                ".github/real-namespace.Dockerfile",
+                ".github",
+            ],
+        )
+        dockerfile = (ROOT / ".github/real-namespace.Dockerfile").read_text()
+        self.assertIn("FROM debian:13", dockerfile)
+        self.assertIn("apt-get install --yes --no-install-recommends iproute2", dockerfile)
+
+    def test_real_namespace_ci_uses_cargos_exact_test_artifact(self):
+        """A leftover executable must not replace the test artifact Cargo built."""
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Test AgentX against real network namespaces"
+        )
+        run = str(step.get("run", ""))
+        self.assertIn("--message-format=json", run)
+        self.assertIn('target.name == "real_namespace"', run)
+        self.assertNotIn("find target/debug/deps", run)
+
+    def test_real_namespace_ci_limits_container_authority(self):
+        """The test may administer only its isolated container network namespace."""
+        step = next(
+            step
+            for job in workflow("checks.yml")["jobs"].values()
+            for step in job.get("steps", [])
+            if step.get("name") == "Test AgentX against real network namespaces"
+        )
+        run = str(step.get("run", ""))
+        self.assertNotIn("--privileged", run)
+        for option in (
+            "--network none",
+            "--read-only",
+            "--cap-drop ALL",
+            "--cap-add SYS_ADMIN",
+            "--cap-add NET_ADMIN",
+            "--cap-add SETUID",
+            "--cap-add SETGID",
+            "--cap-add KILL",
+            "--security-opt no-new-privileges",
+        ):
+            self.assertIn(option, run)
 
     def test_the_documented_zizmor_command_matches_ci(self):
         """A narrower local command passes while CI fails.
@@ -1200,6 +1315,40 @@ class GuardRegressionTests(unittest.TestCase):
             )
             step["if"] = "${{ false }}"
             job["steps"].append({"run": f"echo {required}"})
+
+        self.mutate(".github/workflows/checks.yml", change)
+        with self.assertRaises(AssertionError):
+            self.policy.test_ci_runs_the_real_namespace_agentx_suite()
+
+    def test_real_namespace_guard_rejects_an_artifact_decoy(self):
+        path = ROOT / ".github/workflows/checks.yml"
+
+        def change(data):
+            job = data["jobs"]["check"]
+            step = next(
+                step for step in job["steps"] if runs_real_namespace_suite(step)
+            )
+            run = str(step["run"])
+            step["run"] = (
+                "echo --message-format=json\n"
+                "echo 'target.name == \"real_namespace\"'\n"
+                "TEST_BINARY=/bin/true\n"
+                f"{run[run.index('docker build'):]}"
+            )
+
+        self.mutate(path.relative_to(ROOT), change)
+        with self.assertRaises(AssertionError):
+            self.policy.test_ci_runs_the_real_namespace_agentx_suite()
+
+    def test_real_namespace_guard_requires_the_test_binary_entrypoint(self):
+        def change(data):
+            job = data["jobs"]["check"]
+            step = next(
+                step for step in job["steps"] if runs_real_namespace_suite(step)
+            )
+            step["run"] = str(step["run"]).replace(
+                '  --entrypoint "$TEST_BINARY" \\\n', ""
+            )
 
         self.mutate(".github/workflows/checks.yml", change)
         with self.assertRaises(AssertionError):
