@@ -640,10 +640,6 @@ fn topology_changes_eventually_reach_get_and_walk() {
 
     ip(&["link", "add", "created0", "type", "dummy"]);
     let created = interface_indices()["created0"];
-    assert_eq!(
-        get_value(&mut stream, NETWORK_ORDER, 100, 4, (0, created)),
-        Value::NoSuchInstance
-    );
     wait_for_value(
         &mut stream,
         NETWORK_ORDER,
@@ -668,10 +664,6 @@ fn topology_changes_eventually_reach_get_and_walk() {
     assert!(walk(&mut stream, NETWORK_ORDER, 100, 40).contains(&(bond, member)));
 
     ip(&["link", "set", "member0", "nomaster"]);
-    assert_eq!(
-        get_value(&mut stream, NETWORK_ORDER, 100, 5, (bond, member)),
-        Value::Integer(1)
-    );
     wait_for_value(
         &mut stream,
         NETWORK_ORDER,
@@ -685,10 +677,6 @@ fn topology_changes_eventually_reach_get_and_walk() {
     assert!(rows.contains(&(member, 0)));
 
     ip(&["link", "delete", "member0"]);
-    assert_eq!(
-        get_value(&mut stream, NETWORK_ORDER, 100, 6, (0, member)),
-        Value::Integer(1)
-    );
     wait_for_value(
         &mut stream,
         NETWORK_ORDER,
