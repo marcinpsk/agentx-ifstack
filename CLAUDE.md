@@ -9,19 +9,16 @@ An AgentX (RFC 2741) subagent that serves IF-MIB `ifStackTable`
 behavior, package commands, and the table model.
 
 `config.rs` validates CLI and file settings before supervision starts.
-`link.rs` parses topology, `mib.rs` serves ordered rows, `session.rs` handles
-AgentX and refresh I/O, and `main.rs` supervises reconnection.
+`netlink.rs` acquires links, `link.rs` validates topology, `monitor.rs`
+schedules and publishes it, `mib.rs` serves ordered rows, `session.rs` handles
+AgentX, and `main.rs` supervises reconnection.
 
 ## Configuration and packages
 
-For issue #8 topology-monitor work, follow the
-[confirmed ADR](docs/adr/0001-monitor-topology-independently-of-agentx.md).
-It takes precedence over the current runtime details below. The replacement
-uses a `reconcile` interval and one process-lifetime netlink monitor. It removes
-the `refresh` setting and the `ip` subprocess path in the same change.
-
-Keep the legacy runtime configuration limited to socket, refresh, priority,
-and log_level.
+For topology-monitor changes, follow the
+[behavior ADR](docs/adr/0001-monitor-topology-independently-of-agentx.md)
+and [implementation ADR](docs/adr/0002-implement-the-netlink-monitor-as-a-process-actor.md).
+Runtime configuration is limited to socket, reconcile, priority, and log_level.
 An absent default file is allowed. An explicit missing file or invalid file
 must fail before the supervise loop. Tests use real temporary files and the
 actual binary with an AgentX UnixListener.
@@ -38,8 +35,8 @@ the service disabled and stopped. Upgrades restart only an active service.
 Preserve local configuration edits in both formats.
 
 The unit runs as root to traverse /var/agentx, with an empty capability set.
-Keep the host network namespace and allow AF_UNIX, AF_NETLINK, and execution
-of ip. Offline unit analysis does not prove live sandbox compatibility.
+Keep the host network namespace and allow AF_UNIX and AF_NETLINK. Offline unit
+analysis does not prove live sandbox compatibility.
 See README.md for the documented lint exceptions. Keep package contents and
 examples free of private project references and build-machine identifiers.
 
@@ -103,27 +100,16 @@ relationships separately from boundary rows.
 
 ## Data source
 
-Legacy implementation only: `ip -details -json link show` supplies every
-relationship needed. Prefer parsing that JSON over `/sys/class/net` traversal.
+Use typed route-netlink messages. The link header supplies the interface
+index. `Controller` supplies bond and bridge membership. `Link` supplies the
+lower index for VLAN, macvlan, ipvlan, and macvtap. VXLAN uses only
+`InfoData::Vxlan` and `InfoVxlan::Link`; a missing or unresolved underlay leaves
+it standalone. Reject remote lower-interface references. Exclude veth peer
+links from stack rows.
 
-| field | meaning |
-|---|---|
-| `ifindex` | the interface's own ifIndex |
-| `master` | bond or bridge membership, names the higher sub-layer |
-| `linkinfo.info_kind` | interface kind, distinguishes stack layers from peers |
-| `link` | lower interface name for `vlan`, `macvlan`, `ipvlan`, and `macvtap` |
-| `link_index` | lower interface index when emitted in numeric form |
-| `linkinfo.info_data.link` | lower interface name for `vxlan` |
-
-A vxlan does not use `link` or `link_index`. Its underlay is `IFLA_VXLAN_LINK`,
-which `ip` prints inside `linkinfo.info_data`. It always prints a name, through
-`ll_index_to_name`, which falls back to the literal `if<index>` when no interface
-resolves. An underlay that names no interface in the same output is therefore not a
-local relationship, so the vxlan is standalone. A vxlan with no underlay at all is
-standalone too. Neither case is an error: one odd interface must not fail the table.
-
-Reject lower-interface references with `link_netnsid`: remote ifIndexes are
-not local interface identifiers. Exclude veth peer links from stack rows.
+Inspect `NLM_F_DUMP_INTR` on every inventory message, including the final
+`NLMSG_DONE`. Notification overrun, receive failure, and termination are
+continuity loss. See ADR 0002 for the acquisition and publication seams.
 
 ## AgentX constraints that shape the design
 

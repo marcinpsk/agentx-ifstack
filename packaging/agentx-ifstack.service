@@ -8,7 +8,6 @@ StartLimitBurst=3
 Type=simple
 User=root
 ExecStart=/usr/bin/agentx-ifstack
-Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
 Restart=on-failure
 RestartPreventExitStatus=1
 RestartSec=5s

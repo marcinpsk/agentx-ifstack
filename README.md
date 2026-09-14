@@ -3,9 +3,10 @@
 An AgentX (RFC 2741) subagent that serves IF-MIB `ifStackTable`
 (`1.3.6.1.2.1.31.1.2`) for Linux hosts, so SNMP monitoring systems can discover interface relationships.
 
-The subagent serves GET, GETNEXT, and GETBULK requests. It refreshes the
-topology on demand after a five-second cache window. It reconnects and
-registers again when the master closes the session or the socket fails.
+The subagent serves GET, GETNEXT, and GETBULK requests. One background netlink
+monitor keeps the topology current independently of AgentX sessions. The
+subagent reconnects and registers again when the master closes the session or
+the socket fails.
 
 ## Install and run
 
@@ -25,9 +26,8 @@ On an RPM distribution with DNF:
 sudo dnf install ./agentx-ifstack-*.x86_64.rpm
 ```
 
-The packages depend on `iproute2` on Debian and `iproute` on RPM distributions.
-They install the service without enabling or starting it. Add this line to
-`/etc/snmp/snmpd.conf`:
+The packages install the service without enabling or starting it. Add this
+line to `/etc/snmp/snmpd.conf`:
 
 ```text
 master agentx
@@ -46,7 +46,7 @@ man agentx-ifstack
 
 The service runs as root because `/var/agentx` is normally root-owned with mode
 0700. It has no capabilities and writes no files. Its systemd sandbox permits
-Unix and netlink sockets and execution of `ip` in the host network namespace.
+Unix and netlink sockets in the host network namespace.
 The unit orders itself after `snmpd.service` without pulling that service in.
 A missing master causes connection retries, not startup failure.
 
@@ -57,19 +57,24 @@ configuration as `/etc/agentx-ifstack.toml.rpmsave` on removal.
 Both package formats preserve local configuration edits during upgrades.
 An upgrade restarts the service only if it is already running.
 
+Before upgrading from a release that used `refresh`, replace that key in the
+preserved configuration. The old key is intentionally invalid. For example,
+replace `refresh = 5` with `reconcile = 3600`.
+
 ## Configuration
 
 The default file is `/etc/agentx-ifstack.toml`. It accepts exactly four keys:
 
 ```toml
 socket = "/var/agentx/master"
-refresh = 5
+reconcile = 3600
 priority = 127
 log_level = "info"
 ```
 
 - `socket` is a nonempty AgentX Unix socket path.
-- `refresh` is an integer cache interval in seconds, at least 1.
+- `reconcile` is an integer background reconciliation interval in seconds, at
+  least 1. Its default is 3600.
 - `priority` is an integer from 1 to 255. Lower registration priorities win.
 - `log_level` is `error`, `warn`, `info`, `debug`, or `trace`.
 
@@ -89,12 +94,24 @@ sudo agentx-ifstack --config /etc/agentx-ifstack.toml --socket /run/agentx/maste
 agentx-ifstack --help
 ```
 
-The process uses one thread. It runs `ip -details -json link show` in the
-current network namespace. Refresh is demand driven: the first read after the
-cache expires loads topology again. Failed commands and invalid topology data
-return an AgentX processing error. The next read retries the refresh.
-Reconnect delays start at one second and double to a maximum of 30 seconds.
-A session that lasts at least 30 seconds resets the delay.
+The process uses one topology-monitor thread and the AgentX supervisor thread.
+The monitor subscribes to route-netlink link notifications before its first
+complete inventory. AgentX reads use only the last published table and never
+start topology acquisition.
+
+Link events schedule complete inventories after 1, 2, 4, 8, 16, and at most
+30 seconds during sustained change. A 60-second quiet period resets that
+delay. Failed acquisition retries independently after 1, 2, 4, 8, 16, and at
+most 30 seconds. Successful acquisition resets only the failure delay. The
+periodic `reconcile` inventory is measured from the last successful inventory.
+
+Before the first complete inventory, or after the monitor detects lost
+notification continuity, reads return an AgentX processing error. An ordinary
+inventory failure keeps the previous complete table available. Recovery from
+loss requires a new subscription and a complete post-loss inventory.
+
+AgentX reconnect delays start at one second and double to a maximum of 30
+seconds. A session that lasts at least 30 seconds resets that delay.
 
 ## Build from source
 
@@ -197,41 +214,18 @@ registered connection has no read timeout.
 
 ## Data source
 
-`ip -details -json link show` supplies everything needed:
+The process reads typed `RTM_GETLINK` inventories and subscribes to the
+route-netlink link multicast group. The link header supplies the interface
+index. `IFLA_MASTER` supplies bond and bridge membership. `IFLA_LINK` supplies
+the lower interface for VLAN, macvlan, ipvlan, and macvtap. VXLAN uses only
+`IFLA_VXLAN_LINK` from its link-info data.
 
-| field | meaning |
-|---|---|
-| `ifindex` | the interface's own ifIndex |
-| `master` | bond or bridge membership, as an interface **name** |
-| `linkinfo.info_kind` | interface kind, used to distinguish stack layers from peers |
-| `link` | lower interface **name** for `vlan`, `macvlan`, `ipvlan`, and `macvtap` |
-| `link_index` | lower interface index when emitted in numeric form |
-| `linkinfo.info_data.link` | lower interface **name** for `vxlan` |
-
-Verified against real Proxmox hosts: `master` and `link` are
-**names, not indices**, and `link_index` is absent entirely. Build an
-ifname -> ifindex map from the same output and resolve through it. Do not
-depend on `link_index` being present.
-
-The parser resolves lower interfaces for `vlan`, `macvlan`, `ipvlan`, and
-`macvtap` through either `link` or `link_index`. A vxlan carries its underlay in
-`linkinfo.info_data` instead, always as a name. `ip` writes the literal `if<index>`
-there when no interface resolves, so an underlay that matches no interface in the same
-output leaves the vxlan standalone, as does a vxlan with no underlay. It rejects
-missing lower interfaces, conflicting references, duplicate names or indices,
-and self-links. It does not treat veth peer links or VRF membership as stack
-relationships. A lower interface in another namespace is an error because
-its ifIndex cannot identify a local interface.
-
-Real topologies to handle, present in the collected captures:
-
-- a bond with physical members (`bond0` <- `nic2`, `nic3`)
-- VLANs on a bond (`bond0.110`, `bond0.111`, each `link: bond0`)
-- a bond enslaved to a bridge (`bond1` has `master: vmbr1`), so an interface is
-  a higher sub-layer for its members and a lower sub-layer for the bridge
-- a VLAN on a bridge (`vmbr1.120`, `link: vmbr1`)
-- Proxmox firewall bridges (`fwbr<vmid>i0`) joined to `vmbr0` by a veth pair
-  (`fwpr<vmid>p0` / `fwln<vmid>i0`), plus `tap<vmid>i<n>` guest interfaces
+The monitor publishes only a completed, validated inventory. It rejects dump
+interruption, malformed or partial messages, unsupported indices, missing
+local endpoints, duplicate interfaces, and self-links. A missing or unresolved
+VXLAN underlay leaves the VXLAN standalone. Veth peer links and unsupported
+controller kinds are not stack relationships. A remote-namespace lower link
+never becomes a local relationship.
 
 ## Tests
 
@@ -242,25 +236,36 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 ```
 
+The normal `cargo test` command compiles but does not run the privileged
+real-interface suite. On Linux, install `iproute2` and run that suite with:
+
+```bash
+CARGO="$(command -v cargo)"
+sudo env HOME="$HOME" "$CARGO" test --locked --test real_namespace -- --ignored
+```
+
+Each test creates a network namespace, temporary configuration, AgentX Unix
+socket, and subagent process. The tests discover the kernel-assigned interface
+indices. They fail if `iproute2`, root access, or network namespace permission
+is missing. Sandboxes that deny `unshare(CLONE_NEWNET)` cannot run this suite.
+CI invokes it explicitly and treats missing prerequisites as a failure.
+
 `python3 packaging/test_policy.py` checks the release gate, push triggers, and
 service restart policy. It requires PyYAML 6.0.3, pre-commit 4.5.1, `gh`, `jq`, and Bash.
 The shared checks workflow runs it.
 
-`tests/session.rs` runs the actual binary against a UnixListener. The master
-uses real AgentX PDUs. A fixture executable supplies `ip` output without
-changing host interfaces. Tests cover both byte orders, reads, bulk walks,
-write rejection, cache refresh, errors, Close, and reconnect after socket
-loss. Configuration tests use real temporary files. Wire tests prove that the
-configured socket, priority, and refresh interval take effect and that the CLI
-socket overrides the file. Raw wire tests cover oversized OIDs at both SearchRange ends and in
-TestSet names and OID values. They check `parseError`, process survival, and
-a normal GET on the same connection. Pure tests cover topology fixtures and
-OID boundaries.
+`tests/real_namespace.rs` runs the actual binary against a UnixListener and
+real isolated Linux interfaces. It covers both byte orders, reads, bulk walks,
+write rejection, asynchronous topology updates, Close, reconnect after socket
+loss, configuration, and the request OID limit. It asserts direct
+relationships separately from zero-index boundary rows.
 
-`tests/fixtures/proxmox.json` preserves the relationship fields from the
-collected Proxmox capture. Interface names are replaced with `port<index>`.
-Addresses and unrelated configuration fields are removed. Add sanitized
-captures as JSON fixtures and assert their expected direct rows in `link.rs`.
+Pure tests run the real monitor against one controlled acquisition adapter.
+They cover exact event and failure backoff, coalescing, reconciliation,
+availability, continuity loss, stale completion, and read independence. The
+production adapter tests use actual netlink packet types and raw receive
+outcomes. They cover dump completion, interruption, malformed input, overrun,
+receive failure, termination, and resubscription.
 
 ## Sources
 
@@ -272,6 +277,8 @@ The table decisions are grounded in these, not in convention:
   through 7.2.4, for PDU handling, the 128 sub-identifier OID limit, and GETNEXT
   semantics.
 - The `agentx` 0.1.1 source, for the encoder and decoder behaviour this depends on.
+- The rust-netlink `netlink-sys`, `netlink-packet-core`, and
+  `netlink-packet-route` sources, for route socket and message decoding.
 
 ## License
 
