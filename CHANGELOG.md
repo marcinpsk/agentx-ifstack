@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.2.0 (2026-09-14)
+
+### Documentation
+
+- The netlink monitoring design and implementation handoff
+  ([#9](https://github.com/marcinpsk/agentx-ifstack/pull/9),
+  [`f819fb9`](https://github.com/marcinpsk/agentx-ifstack/commit/f819fb9f5ef3e75c8f3ff768cd6cad010abd7dae))
+
+### Features
+
+- Netlink ([#12](https://github.com/marcinpsk/agentx-ifstack/pull/12),
+  [`522e44d`](https://github.com/marcinpsk/agentx-ifstack/commit/522e44d76ccf7bc973d4bf75f41c14369ec83abe))
+
+
 ## v0.1.0 (2026-09-12)
 
 ### Bug Fixes

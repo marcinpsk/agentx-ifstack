@@ -10,7 +10,7 @@ checksum = "777fd585088237643c74b46485a5eeec86630981d8e7b0b1b1844128fd2a82d6"
 
 [[package]]
 name = "agentx-ifstack"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agentx",
  "env_logger",
