@@ -683,10 +683,12 @@ fn topology_changes_eventually_reach_get_and_walk() {
 
     ip(&["link", "add", "created0", "type", "dummy"]);
     let created = interface_indices()["created0"];
-    std::thread::sleep(Duration::from_millis(1250));
-    assert_eq!(
-        get_value(&mut stream, NETWORK_ORDER, 100, 4, (0, created)),
-        Value::Integer(1)
+    wait_for_value(
+        &mut stream,
+        NETWORK_ORDER,
+        100,
+        (0, created),
+        Value::Integer(1),
     );
     let rows = walk(&mut stream, NETWORK_ORDER, 100, 20);
     assert!(rows.contains(&(0, created)));

@@ -229,6 +229,11 @@ def runs_real_namespace_suite(step):
     return list(shell_commands(str(step.get("run", "")))) == REAL_NAMESPACE_COMMANDS
 
 
+def iproute_requirements(requirements):
+    """Return forbidden runtime requirement names."""
+    return [name for name in requirements if "iproute" in name]
+
+
 @functools.cache
 def gh_json_fields(group, subcommand):
     """Field names gh accepts for `gh <group> <sub> --json`, read from gh itself."""
@@ -939,13 +944,28 @@ class PackagingPolicyTests(unittest.TestCase):
         deb = manifest["package"]["metadata"]["deb"]
         rpm = manifest["package"]["metadata"]["generate-rpm"]
         self.assertNotIn("iproute", deb.get("depends", ""))
-        self.assertNotIn("iproute", rpm.get("requires", {}))
+        self.assertEqual(iproute_requirements(rpm.get("requires", {})), [])
         unit = (ROOT / "packaging/agentx-ifstack.service").read_text()
         self.assertNotIn("Environment=PATH=", unit)
 
         shipped = tomllib.loads((ROOT / "packaging/agentx-ifstack.toml").read_text())
         self.assertEqual(shipped["reconcile"], 3600)
         self.assertNotIn("refresh", shipped)
+
+    def test_runtime_package_dependency_check_matches_variants(self):
+        """A distribution-specific package suffix must not bypass the guard."""
+        self.assertEqual(
+            iproute_requirements({"iproute2": "*", "systemd": "*"}),
+            ["iproute2"],
+        )
+
+    def test_topology_change_checks_wait_for_publication(self):
+        """Asynchronous topology assertions must use the bounded wait helper."""
+        source = (ROOT / "tests/real_namespace.rs").read_text()
+        test = source.split(
+            "fn topology_changes_eventually_reach_get_and_walk()", 1
+        )[1].split("\n#[test]", 1)[0]
+        self.assertNotIn("std::thread::sleep", test)
 
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.
