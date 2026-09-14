@@ -191,8 +191,12 @@ fn reply(header: &Header) -> Response {
 
 fn acknowledge(stream: &mut UnixStream, request: &Header) -> Result<Header> {
     let (header, bytes) = receive(stream)?;
+    // A Response PDU carries sysUpTime, error and index, then a VarBindList the
+    // master is free to populate. net-snmp does: 40 payload bytes for Open and 32
+    // for Register. Only the fixed 8 byte block is read below, so a longer payload
+    // is an ordinary acknowledgement rather than a malformed one.
     if header.ty != Type::Response
-        || header.payload_length != 8
+        || header.payload_length < 8
         || header.packet_id != request.packet_id
         || header.transaction_id != request.transaction_id
         || (request.ty != Type::Open && header.session_id != request.session_id)
@@ -266,5 +270,47 @@ mod tests {
         let header = Header::from_bytes(&bytes).unwrap();
         let (response, _) = dispatch(&header, &bytes, &tables).unwrap();
         assert_eq!(response.res_error, ResError::ProcessingError);
+    }
+
+    #[test]
+    fn acknowledgement_accepts_a_response_carrying_a_var_bind_list() {
+        // A Response PDU is sysUpTime, error and index followed by a VarBindList,
+        // and net-snmp sends one: probing a live master gives 40 payload bytes for
+        // Open and 32 for Register, never 8. Requiring exactly 8 refuses every real
+        // master while the handshake itself succeeded.
+        for (open, session_id, payload) in [(true, 21_u32, 40_usize), (false, 21_u32, 32_usize)] {
+            let (mut subagent, mut master) =
+                UnixStream::pair().expect("create a socket pair for the fake master");
+
+            let request = if open {
+                let mut request = pdu::Open::new(ID::default(), "agentx-ifstack");
+                request.header.flags = NETWORK_ORDER;
+                request.header.packet_id = 1;
+                Header::from_bytes(&request.to_bytes().unwrap()).unwrap()
+            } else {
+                let mut request = pdu::Register::new(ID::try_from(TABLE.to_vec()).unwrap());
+                request.header.flags = NETWORK_ORDER;
+                request.header.session_id = session_id;
+                request.header.packet_id = 2;
+                Header::from_bytes(&request.to_bytes().unwrap()).unwrap()
+            };
+
+            let mut response = vec![1, Type::Response.to_byte(), NETWORK_ORDER, 0];
+            response.extend_from_slice(&session_id.to_be_bytes());
+            response.extend_from_slice(&request.transaction_id.to_be_bytes());
+            response.extend_from_slice(&request.packet_id.to_be_bytes());
+            response.extend_from_slice(&(payload as u32).to_be_bytes());
+            response.extend_from_slice(&31_223_731_u32.to_be_bytes()); // sysUpTime
+            response.extend_from_slice(&0_u16.to_be_bytes()); // res.error
+            response.extend_from_slice(&0_u16.to_be_bytes()); // res.index
+            response.resize(20 + payload, 0); // the VarBindList the master appends
+            master
+                .write_all(&response)
+                .expect("send the master response");
+
+            let acknowledged = acknowledge(&mut subagent, &request)
+                .expect("a master response carrying a VarBindList is a valid acknowledgement");
+            assert_eq!(acknowledged.session_id, session_id);
+        }
     }
 }
