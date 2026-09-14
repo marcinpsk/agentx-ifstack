@@ -22,14 +22,17 @@ all = { level = "deny", priority = -1 }
 
 [dependencies]
 agentx = "0.1.1"
+netlink-packet-core = "0.9"
+netlink-packet-route = "0.33"
+netlink-sys = "0.9"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 toml = "1.1"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
 libc = "0.2"
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
 
 [profile.release]
@@ -39,8 +42,8 @@ strip = true
 maintainer = "Marcin Zieba <marcinpsk@gmail.com>"
 copyright = "2026 Marcin Zieba"
 license-file = ["packaging/copyright", "0"]
-extended-description = "Serves Linux interface relationships through the AgentX protocol. Reads topology from iproute2 and reconnects when the SNMP master restarts."
-depends = "iproute2, init-system-helpers (>= 1.54~)"
+extended-description = "Serves Linux interface relationships through the AgentX protocol. Monitors topology through netlink and reconnects when the SNMP master restarts."
+depends = "init-system-helpers (>= 1.54~)"
 section = "net"
 priority = "optional"
 changelog = "packaging/changelog"
@@ -82,5 +85,4 @@ assets = [
 ]
 
 [package.metadata.generate-rpm.requires]
-iproute = "*"
 systemd = "*"

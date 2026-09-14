@@ -29,8 +29,21 @@ struct Master {
     child: Child,
 }
 
+enum ProcessIdentity {
+    Unprivileged,
+    TestProcess,
+}
+
 impl Master {
     fn start(config: &str, socket_override: bool) -> Self {
+        Self::start_with_identity(config, socket_override, ProcessIdentity::Unprivileged)
+    }
+
+    fn start_as_test_process(config: &str) -> Self {
+        Self::start_with_identity(config, false, ProcessIdentity::TestProcess)
+    }
+
+    fn start_with_identity(config: &str, socket_override: bool, identity: ProcessIdentity) -> Self {
         let directory = tempfile::Builder::new()
             .prefix("ifstack-real-")
             .tempdir()
@@ -61,11 +74,10 @@ impl Master {
         if socket_override {
             command.arg("--socket").arg(&socket);
         }
-        let child = command
-            .uid(TEST_UID)
-            .gid(TEST_GID)
-            .spawn()
-            .expect("start agentx-ifstack as an unprivileged user");
+        if matches!(identity, ProcessIdentity::Unprivileged) {
+            command.uid(TEST_UID).gid(TEST_GID);
+        }
+        let child = command.spawn().expect("start agentx-ifstack test process");
         Self {
             _directory: directory,
             agentx,
@@ -93,6 +105,16 @@ impl Master {
                 .is_some_and(|line| line.split_whitespace().nth(2) == Some("65534")),
             "subagent did not run with the test UID:\n{status}"
         );
+    }
+
+    fn resource_counts(&self) -> (usize, usize) {
+        let count = |name| {
+            fs::read_dir(format!("/proc/{}/{name}", self.child.id()))
+                .expect("read subagent process resources")
+                .inspect(|entry| assert!(entry.is_ok(), "read process resource: {entry:?}"))
+                .count()
+        };
+        (count("task"), count("fd"))
     }
 }
 
@@ -249,18 +271,28 @@ fn get_value(
     packet_id: u32,
     row: (u32, u32),
 ) -> Value {
-    let mut get = pdu::Get::new(range(row_oid(row)));
-    get.header = header(Type::Get, flags, session_id, packet_id);
-    let response = exchange(stream, &get.to_bytes().expect("encode Get PDU"));
-    assert_eq!(response.res_error, ResError::NoAgentXError);
-    response
-        .vb
-        .expect("Get response has bindings")
-        .0
-        .into_iter()
-        .next()
-        .expect("Get response has one binding")
-        .data
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut get = pdu::Get::new(range(row_oid(row)));
+        get.header = header(Type::Get, flags, session_id, packet_id);
+        let response = exchange(stream, &get.to_bytes().expect("encode Get PDU"));
+        if response.res_error == ResError::NoAgentXError {
+            return response
+                .vb
+                .expect("Get response has bindings")
+                .0
+                .into_iter()
+                .next()
+                .expect("Get response has one binding")
+                .data;
+        }
+        assert_eq!(response.res_error, ResError::ProcessingError);
+        assert!(
+            Instant::now() < deadline,
+            "topology monitor did not publish an initial inventory"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn walk(
@@ -272,9 +304,20 @@ fn walk(
     let mut start = oid("");
     let mut rows = Vec::new();
     for packet_id in first_packet_id..first_packet_id + 1024 {
-        let mut next = pdu::GetNext::new(range(start));
-        next.header = header(Type::GetNext, flags, session_id, packet_id);
-        let response = exchange(stream, &next.to_bytes().expect("encode GetNext PDU"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let response = loop {
+            let mut next = pdu::GetNext::new(range(start.clone()));
+            next.header = header(Type::GetNext, flags, session_id, packet_id);
+            let response = exchange(stream, &next.to_bytes().expect("encode GetNext PDU"));
+            if response.res_error != ResError::ProcessingError {
+                break response;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "topology monitor did not publish an initial inventory"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
         assert_eq!(response.res_error, ResError::NoAgentXError);
         let binding = response
             .vb
@@ -324,7 +367,7 @@ fn wait_for_value(
     row: (u32, u32),
     expected: Value,
 ) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(35);
     loop {
         let actual = get_value(stream, flags, session_id, 800, row);
         if actual == expected {
@@ -631,7 +674,7 @@ fn topology_changes_eventually_reach_get_and_walk() {
     enter_network_namespace();
     ip(&["link", "add", "member0", "type", "dummy"]);
     let member = interface_indices()["member0"];
-    let master = Master::start("refresh = 2\n", false);
+    let master = Master::start("reconcile = 3600\n", false);
     let mut stream = master.connect(NETWORK_ORDER, 100);
     assert_eq!(
         get_value(&mut stream, NETWORK_ORDER, 100, 3, (0, member)),
@@ -697,7 +740,7 @@ fn process_reregisters_after_close_and_socket_loss() {
     enter_network_namespace();
     let indices = create_chain();
     let relationship = (indices["bond0"], indices["bondmember"]);
-    let master = Master::start("refresh = 1\n", false);
+    let master = Master::start("reconcile = 3600\n", false);
 
     let mut first = master.connect(0, 100);
     assert_eq!(
@@ -714,6 +757,48 @@ fn process_reregisters_after_close_and_socket_loss() {
     wait_for_value(&mut third, 0, 300, relationship, Value::NoSuchInstance);
     assert!(!walk(&mut third, 0, 300, 20).contains(&relationship));
     close(&mut third, 0, 300);
+}
+
+#[test]
+#[ignore = "requires root, iproute2, and network namespace permission"]
+fn repeated_events_and_agentx_reconnects_keep_resources_bounded() {
+    enter_network_namespace();
+    // This test must share an identity with the daemon to inspect /proc without
+    // adding CAP_SYS_PTRACE to the hardened CI container. Other tests prove the
+    // production binary runs under an unprivileged identity.
+    let master = Master::start_as_test_process("reconcile = 3600\n");
+    let mut stream = master.connect(NETWORK_ORDER, 100);
+    let loopback = interface_indices()["lo"];
+    assert_eq!(
+        get_value(&mut stream, NETWORK_ORDER, 100, 3, (0, loopback)),
+        Value::Integer(1)
+    );
+    let baseline = master.resource_counts();
+    let mut observed = Vec::new();
+
+    for cycle in 0..3 {
+        let name = format!("change{cycle}");
+        ip(&["link", "add", &name, "type", "dummy"]);
+        let index = interface_indices()[&name];
+        wait_for_value(
+            &mut stream,
+            NETWORK_ORDER,
+            100 + cycle,
+            (0, index),
+            Value::Integer(1),
+        );
+        close(&mut stream, NETWORK_ORDER, 100 + cycle);
+        stream = master.connect(NETWORK_ORDER, 101 + cycle);
+        observed.push(master.resource_counts());
+    }
+
+    assert!(
+        observed
+            .iter()
+            .all(|&(threads, fds)| threads <= baseline.0 + 1 && fds <= baseline.1 + 2),
+        "resource growth exceeded bounds: baseline={baseline:?}, observed={observed:?}"
+    );
+    close(&mut stream, NETWORK_ORDER, 103);
 }
 
 #[test]

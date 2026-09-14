@@ -15,18 +15,20 @@ Enable
 .B master agentx
 in snmpd.conf before enabling this service.
 .PP
-The daemon runs
-.B ip \-details \-json link show
-in its network namespace to find bonds, bridges, and interface layers.
+The daemon uses route netlink in its network namespace to find bonds, bridges,
+and interface layers.
 It serves GET, GETNEXT, and GETBULK requests.
 Rows use the higher interface index first and the lower interface index second.
 Required zero-index boundary rows are included.
 Writes are rejected.
 .PP
-Topology refresh is demand driven.
-After the cache expires, the next read request refreshes it.
-A refresh failure returns an AgentX processing error.
-The next read request retries the refresh.
+One process-lifetime monitor subscribes to link notifications before its first
+complete inventory.
+AgentX reads use only the last published table and never start acquisition.
+Periodic reconciliation covers silently missed events.
+Before the first valid inventory, or after detected notification loss, reads
+return an AgentX processing error until a complete inventory succeeds.
+An ordinary inventory failure keeps the previous complete table available.
 .PP
 The daemon reconnects and registers again when the master disconnects.
 Retry delays start at one second and double to a maximum of 30 seconds.
@@ -57,8 +59,8 @@ causes a nonzero exit before any connection attempt.
 AgentX master Unix socket path.
 The path must not be empty.
 .TP
-.B refresh = 5
-Seconds to cache interface topology.
+.B reconcile = 3600
+Seconds between background complete inventories when no link event requires one.
 The value must be an integer of at least 1.
 .TP
 .B priority = 127
@@ -89,16 +91,25 @@ There is no configuration reload signal.
 Zero indicates that help or version output completed.
 A configuration or command-line error exits with status 1.
 During normal operation the process runs until terminated.
-Connection and refresh failures do not terminate it.
+Connection and acquisition failures do not terminate it.
 .SH NOTES
 The service runs as root because /var/agentx is normally mode 0700 and owned by root.
 An unprivileged process cannot traverse that directory.
 The systemd unit removes all capabilities and permits Unix and netlink sockets.
-It needs to execute /usr/sbin/ip and read the host network namespace.
+It reads the host network namespace directly through netlink.
+.PP
+Before upgrading from a release that used
+.B refresh,
+replace that key explicitly in the preserved configuration.
+For example, replace
+.B refresh = 5
+with
+.BR reconcile = 3600 .
+The removed key is not accepted as an alias.
 .SH SEE ALSO
 .BR snmpd.conf (5),
 .BR snmpd (8),
-.BR ip-link (8)
+.BR rtnetlink (7)
 .PP
 RFC 2741, Agent Extensibility (AgentX) Protocol Version 1.
 .br
