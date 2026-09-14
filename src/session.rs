@@ -1,34 +1,22 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agentx::ByteOrder;
 use agentx::encodings::{ID, Value, VarBindList};
 use agentx::pdu::{self, Header, ResError, Response, Type};
 
-use crate::{
-    config::Config,
-    link,
-    mib::{Mib, TABLE},
-};
+use crate::{config::Config, mib::TABLE, monitor::TableReader};
 
 const NETWORK_ORDER: u8 = 1 << pdu::NETWORK_BYTE_ORDER;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
-// Must stay below the session timeout above so a slow ip still leaves time to answer.
-const IP_TIMEOUT: Duration = Duration::from_secs(3);
-const IP_POLL: Duration = Duration::from_millis(20);
-const MAX_IP_OUTPUT: usize = 16 * 1024 * 1024;
-const IP_REAP_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_PAYLOAD: u32 = 1024 * 1024;
 const MAX_OID_SUBIDS: usize = 128;
 const NOT_WRITABLE: u16 = 17;
 const COMMIT_FAILED: u16 = 14;
 const UNDO_FAILED: u16 = 15;
 
-pub fn run(config: &Config) -> Result<()> {
+pub fn run(config: &Config, tables: &TableReader) -> Result<()> {
     log::info!("Connecting to AgentX master at {}", config.socket.display());
     let mut stream = UnixStream::connect(&config.socket)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -53,10 +41,6 @@ pub fn run(config: &Config) -> Result<()> {
         opened.session_id
     );
 
-    let mut cache = Cache {
-        topology: None,
-        refresh: Duration::from_secs(config.refresh),
-    };
     loop {
         let (header, bytes) = receive(&mut stream)?;
         log::debug!(
@@ -81,7 +65,7 @@ pub fn run(config: &Config) -> Result<()> {
             }
             continue;
         }
-        let (mut response, snmp_error) = match dispatch(&header, &bytes, &mut cache) {
+        let (mut response, snmp_error) = match dispatch(&header, &bytes, tables) {
             Ok(result) => result,
             Err(error) => {
                 log::warn!("AgentX request parse failed: {error}");
@@ -104,7 +88,11 @@ pub fn run(config: &Config) -> Result<()> {
     }
 }
 
-fn dispatch(header: &Header, bytes: &[u8], cache: &mut Cache) -> Result<(Response, Option<u16>)> {
+fn dispatch(
+    header: &Header,
+    bytes: &[u8],
+    tables: &TableReader,
+) -> Result<(Response, Option<u16>)> {
     let mut response = reply(header);
     if header.flags & (1 << pdu::NON_DEFAULT_CONTEXT) != 0 {
         response.res_error = ResError::UnsupportedContext;
@@ -128,8 +116,8 @@ fn dispatch(header: &Header, bytes: &[u8], cache: &mut Cache) -> Result<(Respons
             if ranges.0.iter().any(|range| range.start.include > 1) {
                 return Err(invalid("invalid SearchRange include flag"));
             }
-            match cache.get() {
-                Ok(mib) => {
+            match tables.snapshot() {
+                Some(mib) => {
                     response.vb = Some(if let Some((non_repeaters, max_repetitions)) = bulk {
                         mib.get_bulk(ranges, non_repeaters, max_repetitions)
                     } else {
@@ -148,8 +136,7 @@ fn dispatch(header: &Header, bytes: &[u8], cache: &mut Cache) -> Result<(Respons
                         )
                     });
                 }
-                Err(error) => {
-                    log::error!("Interface refresh failed: {error}");
+                None => {
                     response.res_error = ResError::ProcessingError;
                 }
             }
@@ -247,225 +234,37 @@ fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
     Ok((header, bytes))
 }
 
-fn read_links() -> Result<Vec<u8>> {
-    IpCommand::spawn()?.into_output()
-}
-
-struct IpCommand {
-    child: Option<Child>,
-}
-
-impl IpCommand {
-    fn spawn() -> Result<Self> {
-        Ok(Self {
-            child: Some(
-                Command::new("ip")
-                    .args(["-details", "-json", "link", "show"])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .process_group(0)
-                    .spawn()?,
-            ),
-        })
-    }
-
-    fn exited(&self) -> Result<bool> {
-        let child = self.child.as_ref().expect("unreaped ip child");
-        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-        // SAFETY: info is writable, and WNOWAIT keeps our child's PID allocated.
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                child.id(),
-                info.as_mut_ptr(),
-                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-            )
-        };
-        if result == -1 {
-            return Err(Error::last_os_error());
-        }
-        // SAFETY: waitid succeeded; the zeroed record also covers no pending exit.
-        Ok(unsafe { info.assume_init().si_pid() } != 0)
-    }
-
-    fn into_output(mut self) -> Result<Vec<u8>> {
-        let deadline = Instant::now() + IP_TIMEOUT;
-        let child = self.child.as_mut().expect("unreaped ip child");
-        let mut stdout = child.stdout.take().expect("piped stdout");
-        let mut stderr = child.stderr.take().expect("piped stderr");
-        let mut fds = [stdout.as_raw_fd(), stderr.as_raw_fd()].map(|fd| libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        });
-        for fd in &fds {
-            // SAFETY: Each descriptor belongs to a live pipe owned by this call.
-            let flags = unsafe { libc::fcntl(fd.fd, libc::F_GETFL) };
-            if flags == -1 {
-                return Err(Error::last_os_error());
-            }
-            // SAFETY: F_SETFL changes only this pipe's read-side file description.
-            if unsafe { libc::fcntl(fd.fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
-                return Err(Error::last_os_error());
-            }
-        }
-        let mut output = [Vec::new(), Vec::new()];
-        let mut pipes: [&mut dyn Read; 2] = [&mut stdout, &mut stderr];
-        loop {
-            ip_time_left(deadline)?;
-            let exited = match self.exited() {
-                Ok(exited) => exited,
-                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            };
-            if exited && fds.iter().all(|fd| fd.fd < 0) {
-                break;
-            }
-            let remaining = ip_time_left(deadline)?;
-            let timeout = if exited {
-                remaining
-            } else {
-                remaining.min(IP_POLL)
-            };
-            let millis = timeout.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
-            // SAFETY: fds is writable and contains exactly the supplied number of entries.
-            let result = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, millis) };
-            let error = (result == -1).then(Error::last_os_error);
-            ip_time_left(deadline)?;
-            if let Some(error) = error {
-                if error.kind() == ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error);
-            }
-            for ((fd, pipe), bytes) in fds.iter_mut().zip(&mut pipes).zip(&mut output) {
-                if fd.fd < 0 || fd.revents == 0 {
-                    continue;
-                }
-                let mut buffer = [0; 8192];
-                loop {
-                    ip_time_left(deadline)?;
-                    // Read one byte past the cap to distinguish full from oversized output.
-                    let limit = buffer.len().min(MAX_IP_OUTPUT + 1 - bytes.len());
-                    match pipe.read(&mut buffer[..limit]) {
-                        Ok(0) => {
-                            fd.fd = -1;
-                            break;
-                        }
-                        Ok(count) => {
-                            bytes.extend_from_slice(&buffer[..count]);
-                            if bytes.len() > MAX_IP_OUTPUT {
-                                return Err(invalid(&format!(
-                                    "ip link wrote more than {MAX_IP_OUTPUT} bytes"
-                                )));
-                            }
-                        }
-                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
-                        Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                        Err(error) => {
-                            fd.fd = -1;
-                            return Err(error);
-                        }
-                    }
-                }
-                if fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
-                    fd.fd = -1;
-                    return Err(Error::other("ip output pipe failed"));
-                }
-            }
-        }
-        let status = self.finish()?;
-        let [stdout, stderr] = output;
-        if status.success() {
-            Ok(stdout)
-        } else {
-            Err(Error::other(format!(
-                "ip link exited with {}: {}",
-                status,
-                String::from_utf8_lossy(&stderr).trim()
-            )))
-        }
-    }
-
-    fn finish(&mut self) -> Result<ExitStatus> {
-        let mut child = self.child.take().expect("unreaped ip child");
-        // SAFETY: The owned, unreaped child reserves this process group ID.
-        let result = unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-        if result == -1 {
-            let error = Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                log::warn!("Cannot kill ip process group: {error}");
-            }
-        }
-        let deadline = Instant::now() + IP_REAP_TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => return Ok(status),
-                Ok(None) => (),
-                Err(error) if error.kind() == ErrorKind::Interrupted => (),
-                Err(error) => return Err(error),
-            }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                // A D-state child may leak a zombie; never block or signal its group again.
-                return Err(Error::new(
-                    ErrorKind::TimedOut,
-                    "ip child could not be reaped",
-                ));
-            }
-            std::thread::sleep(remaining.min(IP_POLL));
-        }
-    }
-}
-
-impl Drop for IpCommand {
-    fn drop(&mut self) {
-        if self.child.is_some()
-            && let Err(error) = self.finish()
-        {
-            log::warn!("Cannot clean up ip child: {error}");
-        }
-    }
-}
-
-fn ip_time_left(deadline: Instant) -> Result<Duration> {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        Err(Error::new(
-            ErrorKind::TimedOut,
-            "ip link exceeded its deadline",
-        ))
-    } else {
-        Ok(remaining)
-    }
-}
-
-struct Cache {
-    topology: Option<(Instant, Mib)>,
-    refresh: Duration,
-}
-
-impl Cache {
-    fn get(&mut self) -> Result<&Mib> {
-        if self
-            .topology
-            .as_ref()
-            .is_none_or(|(updated, _)| updated.elapsed() >= self.refresh)
-        {
-            let stdout = read_links()?;
-            let json = std::str::from_utf8(&stdout)
-                .map_err(|error| Error::new(ErrorKind::InvalidData, error))?;
-            let mib = Mib::new(link::parse(json)?);
-            self.topology = Some((Instant::now(), mib));
-        }
-        Ok(&self
-            .topology
-            .as_ref()
-            .expect("cache populated after successful refresh")
-            .1)
-    }
-}
-
 fn invalid(message: &str) -> Error {
     Error::new(ErrorKind::InvalidData, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use agentx::encodings::SearchRangeList;
+
+    use super::*;
+    use crate::monitor::publication;
+
+    #[test]
+    fn every_read_pdu_reports_processing_error_before_the_first_inventory() {
+        let tables = publication();
+        let mut requests = vec![
+            pdu::Get::new(SearchRangeList::default()),
+            pdu::Get::new(SearchRangeList::default()),
+        ];
+        requests[1].header.ty = Type::GetNext;
+
+        for mut request in requests {
+            let bytes = request.to_bytes().unwrap();
+            let header = Header::from_bytes(&bytes).unwrap();
+            let (response, _) = dispatch(&header, &bytes, &tables).unwrap();
+            assert_eq!(response.res_error, ResError::ProcessingError);
+        }
+
+        let mut request = pdu::GetBulk::new(SearchRangeList::default());
+        let bytes = request.to_bytes().unwrap();
+        let header = Header::from_bytes(&bytes).unwrap();
+        let (response, _) = dispatch(&header, &bytes, &tables).unwrap();
+        assert_eq!(response.res_error, ResError::ProcessingError);
+    }
 }

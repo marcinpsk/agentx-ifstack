@@ -31,6 +31,7 @@ fn invalid_configuration_exits_before_connecting() {
     listener.set_nonblocking(true).unwrap();
     for contents in [
         None,
+        Some("reconcile = 0"),
         Some("refresh = 0"),
         Some("priority = 256"),
         Some("sockett = 'master'"),

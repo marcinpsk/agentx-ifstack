@@ -19,6 +19,43 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
+      - name: Test AgentX against real network namespaces
+        run: |
+          ARTIFACTS="$RUNNER_TEMP/real-namespace-artifacts.json"
+          BINARY_PATH="$RUNNER_TEMP/real-namespace-binary"
+          cargo test --locked --test real_namespace --no-run --message-format=json > "$ARTIFACTS"
+          jq --slurp --raw-output --exit-status '
+            [
+              .[]
+              | select(
+                  .reason == "compiler-artifact"
+                  and .target.kind == ["test"]
+                  and .target.name == "real_namespace"
+                  and .executable != null
+                )
+              | .executable
+            ]
+            | if length == 1 then .[0] else error("expected one real_namespace test artifact") end
+          ' "$ARTIFACTS" > "$BINARY_PATH"
+          IFS= read -r TEST_BINARY < "$BINARY_PATH"
+          test -x "$TEST_BINARY"
+          docker build --tag agentx-ifstack-real-namespace --file .github/real-namespace.Dockerfile .github
+          docker run --rm \
+            --network none \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,exec \
+            --cap-drop ALL \
+            --cap-add SYS_ADMIN \
+            --cap-add NET_ADMIN \
+            --cap-add SETUID \
+            --cap-add SETGID \
+            --cap-add KILL \
+            --security-opt no-new-privileges \
+            --entrypoint "$TEST_BINARY" \
+            --volume "$PWD:$PWD:ro" \
+            --workdir "$PWD" \
+            agentx-ifstack-real-namespace \
+            --ignored
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13'

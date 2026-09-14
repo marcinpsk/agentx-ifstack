@@ -11,7 +11,7 @@ pub const DEFAULT_PATH: &str = "/etc/agentx-ifstack.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub socket: PathBuf,
-    pub refresh: u64,
+    pub reconcile: u64,
     pub priority: u8,
     pub log_level: LogLevel,
 }
@@ -42,7 +42,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             socket: PathBuf::from("/var/agentx/master"),
-            refresh: 5,
+            reconcile: 3600,
             priority: 127,
             log_level: LogLevel::Info,
         }
@@ -97,8 +97,8 @@ pub fn load(
     if config.socket.as_os_str().is_empty() {
         return Err("socket must not be empty".into());
     }
-    if config.refresh == 0 {
-        return Err("refresh must be at least 1 second".into());
+    if config.reconcile == 0 {
+        return Err("reconcile must be at least 1 second".into());
     }
     if config.priority == 0 {
         return Err("priority must be between 1 and 255".into());
@@ -123,12 +123,12 @@ mod tests {
         let path = directory.path().join("config.toml");
         fs::write(
             &path,
-            "socket = '/run/agentx/master'\nrefresh = 1\npriority = 255\nlog_level = 'trace'\n",
+            "socket = '/run/agentx/master'\nreconcile = 1\npriority = 255\nlog_level = 'trace'\n",
         )
         .unwrap();
         let config = run(vec!["--config".into(), path.clone().into()], &path);
         assert_eq!(config.socket, Path::new("/run/agentx/master"));
-        assert_eq!(config.refresh, 1);
+        assert_eq!(config.reconcile, 1);
         assert_eq!(config.priority, 255);
         assert_eq!(config.log_level.filter(), log::LevelFilter::Trace);
     }
@@ -138,7 +138,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config = run(vec![], &directory.path().join("absent.toml"));
         assert_eq!(config.socket, Path::new("/var/agentx/master"));
-        assert_eq!(config.refresh, 5);
+        assert_eq!(config.reconcile, 3600);
         assert_eq!(config.priority, 127);
         assert_eq!(config.log_level.filter(), log::LevelFilter::Info);
     }
@@ -152,6 +152,19 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_replaces_refresh_without_a_compatibility_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+
+        fs::write(&path, "reconcile = 7").unwrap();
+        assert!(load(vec![], &path).is_ok());
+
+        fs::write(&path, "refresh = 7").unwrap();
+        let error = load(vec![], &path).unwrap_err();
+        assert!(error.contains("refresh"), "{error}");
+    }
+
+    #[test]
     fn invalid_files_name_the_key() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
@@ -159,17 +172,17 @@ mod tests {
             ("sockett = 'master'", "sockett"),
             ("socket = ''", "socket"),
             ("socket = 42", "socket"),
-            ("refresh = 'five'", "refresh"),
-            ("refresh = 0", "refresh"),
-            ("refresh = -1", "refresh"),
-            ("refresh = 1.5", "refresh"),
+            ("reconcile = 'five'", "reconcile"),
+            ("reconcile = 0", "reconcile"),
+            ("reconcile = -1", "reconcile"),
+            ("reconcile = 1.5", "reconcile"),
             ("priority = 0", "priority"),
             ("priority = 256", "priority"),
             ("priority = -1", "priority"),
             ("log_level = 'verbose'", "log_level"),
             ("log_level = 'off'", "log_level"),
             ("log_level = 'INFO'", "log_level"),
-            ("refresh = [", "refresh"),
+            ("reconcile = [", "reconcile"),
         ] {
             fs::write(&path, contents).unwrap();
             let error = load(vec![], &path).unwrap_err();
@@ -183,7 +196,7 @@ mod tests {
             toml::from_str(include_str!("../packaging/agentx-ifstack.toml")).unwrap();
         let defaults = Config::default();
         assert_eq!(config.socket, defaults.socket);
-        assert_eq!(config.refresh, defaults.refresh);
+        assert_eq!(config.reconcile, defaults.reconcile);
         assert_eq!(config.priority, defaults.priority);
         assert_eq!(config.log_level.filter(), defaults.log_level.filter());
     }
@@ -210,7 +223,7 @@ mod tests {
             let config = run(args, &path);
             assert_eq!(config.socket, Path::new("cli-socket"));
             assert_eq!(config.priority, 1);
-            assert_eq!(config.refresh, 5);
+            assert_eq!(config.reconcile, 3600);
         }
     }
 }
