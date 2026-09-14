@@ -9,6 +9,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
+const MONITOR_FAILURE_EXIT_STATUS: i32 = 70;
+
 fn main() -> ExitCode {
     let config = match config::load(std::env::args_os().skip(1), Path::new(config::DEFAULT_PATH)) {
         Ok(config::Action::Help) => {
@@ -38,16 +40,17 @@ fn main() -> ExitCode {
     let tables = monitor::publication();
     let monitor_tables = tables.clone();
     let reconcile = Duration::from_secs(config.reconcile);
-    let _monitor = match std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("topology-monitor".to_owned())
-        .spawn(move || monitor::run(netlink::NetlinkSource::new(), &monitor_tables, reconcile))
+        .spawn(move || {
+            run_monitor(|| {
+                monitor::run(netlink::NetlinkSource::new(), &monitor_tables, reconcile);
+            });
+        })
     {
-        Ok(monitor) => monitor,
-        Err(error) => {
-            log::error!("Cannot start topology monitor: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+        log::error!("Cannot start topology monitor: {error}");
+        return ExitCode::FAILURE;
+    }
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
@@ -64,6 +67,14 @@ fn main() -> ExitCode {
     }
 }
 
+fn run_monitor(run: impl FnOnce()) -> ! {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(()) => log::error!("Topology monitor stopped unexpectedly"),
+        Err(_) => log::error!("Topology monitor panicked"),
+    }
+    std::process::exit(MONITOR_FAILURE_EXIT_STATUS);
+}
+
 fn init_logging(level: log::LevelFilter) {
     env_logger::Builder::new()
         .filter_level(level)
@@ -71,4 +82,38 @@ fn init_logging(level: log::LevelFilter) {
         .format_timestamp(None)
         .target(env_logger::Target::Stderr)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::run_monitor;
+
+    const MONITOR_PANIC_CHILD: &str = "AGENTX_IFSTACK_MONITOR_PANIC_CHILD";
+
+    #[test]
+    fn a_monitor_panic_stops_the_process() {
+        if std::env::var_os(MONITOR_PANIC_CHILD).is_some() {
+            run_monitor(|| panic!("simulated topology monitor failure"));
+        }
+
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env(MONITOR_PANIC_CHILD, "1")
+            .args(["--exact", "tests::a_monitor_panic_stops_the_process"])
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(70));
+    }
+
+    #[test]
+    fn ignored_unit_tests_do_not_run_the_monitor_exit_driver() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--nocapture"])
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+    }
 }
