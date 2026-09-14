@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.1 (2026-09-14)
+
+### Bug Fixes
+
+- Accept an acknowledgement carrying a VarBindList
+  ([#13](https://github.com/marcinpsk/agentx-ifstack/pull/13),
+  [`f931fcf`](https://github.com/marcinpsk/agentx-ifstack/commit/f931fcfd21e23b5fb6626861a110736bf551a0b0))
+
+
 ## v0.2.0 (2026-09-14)
 
 ### Documentation
