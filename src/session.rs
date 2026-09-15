@@ -1,6 +1,6 @@
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agentx::ByteOrder;
 use agentx::encodings::{ID, Value, VarBindList};
@@ -42,7 +42,7 @@ pub fn run(config: &Config, tables: &TableReader) -> Result<()> {
     );
 
     loop {
-        let (header, bytes) = receive(&mut stream)?;
+        let (header, bytes) = receive(&mut stream, IO_TIMEOUT)?;
         log::debug!(
             "AgentX request {:?}, packet {}",
             header.ty,
@@ -190,7 +190,7 @@ fn reply(header: &Header) -> Response {
 }
 
 fn acknowledge(stream: &mut UnixStream, request: &Header) -> Result<Header> {
-    let (header, bytes) = receive(stream)?;
+    let (header, bytes) = receive(stream, IO_TIMEOUT)?;
     // A Response PDU carries sysUpTime, error and index, then a VarBindList the
     // master is free to populate. net-snmp does: 40 payload bytes for Open and 32
     // for Register. Only the fixed 8 byte block is read below, so a longer payload
@@ -221,21 +221,45 @@ fn acknowledge(stream: &mut UnixStream, request: &Header) -> Result<Header> {
     Ok(header)
 }
 
-fn receive(stream: &mut UnixStream) -> Result<(Header, Vec<u8>)> {
+fn receive(stream: &mut UnixStream, frame_budget: Duration) -> Result<(Header, Vec<u8>)> {
     let mut bytes = vec![0; 20];
     stream.read_exact(&mut bytes[..1])?;
     let idle_timeout = stream.read_timeout()?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.read_exact(&mut bytes[1..])?;
+    let deadline = Instant::now() + frame_budget;
+    read_before(stream, &mut bytes[1..], deadline)?;
     let header = Header::from_bytes(&bytes)?;
     if header.version != 1 || header.payload_length > MAX_PAYLOAD || header.payload_length % 4 != 0
     {
         return Err(invalid("invalid AgentX version or payload length"));
     }
     bytes.resize(20 + header.payload_length as usize, 0);
-    stream.read_exact(&mut bytes[20..])?;
+    read_before(stream, &mut bytes[20..], deadline)?;
     stream.set_read_timeout(idle_timeout)?;
     Ok((header, bytes))
+}
+
+fn read_before(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
+    while !bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(frame_deadline());
+        }
+        stream.set_read_timeout(Some(remaining))?;
+        match stream.read(bytes) {
+            Ok(0) => return Err(ErrorKind::UnexpectedEof.into()),
+            Ok(count) => bytes = &mut bytes[count..],
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                return Err(frame_deadline());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn frame_deadline() -> Error {
+    Error::new(ErrorKind::TimedOut, "AgentX PDU frame deadline exceeded")
 }
 
 fn invalid(message: &str) -> Error {
@@ -244,6 +268,9 @@ fn invalid(message: &str) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::Instant;
+
     use agentx::encodings::SearchRangeList;
 
     use super::*;
@@ -312,5 +339,67 @@ mod tests {
                 .expect("a master response carrying a VarBindList is a valid acknowledgement");
             assert_eq!(acknowledged.session_id, session_id);
         }
+    }
+
+    #[test]
+    fn a_started_frame_must_complete_before_its_budget() {
+        let budget = Duration::from_millis(100);
+        let frame = Header::new(Type::Ping).to_bytes();
+        let (mut receiver, sender) = UnixStream::pair().expect("create slow socket pair");
+        let drip = drip_frame(
+            sender,
+            frame.clone(),
+            Duration::ZERO,
+            Duration::from_millis(25),
+        );
+        let started = Instant::now();
+        let result = receive(&mut receiver, budget);
+        let elapsed = started.elapsed();
+        drop(receiver);
+        drip.join().expect("join slow frame sender");
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("frame completed after {elapsed:?}, past its {budget:?} budget"),
+        };
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(error.to_string().contains("frame deadline"), "{error}");
+        assert!(
+            elapsed >= budget,
+            "frame failed before its budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "frame deadline was not bounded: {elapsed:?}"
+        );
+
+        let (mut receiver, sender) = UnixStream::pair().expect("create timely socket pair");
+        let idle = budget + Duration::from_millis(50);
+        let drip = drip_frame(sender, frame, idle, Duration::from_millis(3));
+        let started = Instant::now();
+        let (header, _) = receive(&mut receiver, budget).expect("receive frame within its budget");
+        let elapsed = started.elapsed();
+        drip.join().expect("join timely frame sender");
+        assert_eq!(header.ty, Type::Ping);
+        assert!(elapsed >= idle, "idle wait ended after {elapsed:?}");
+    }
+
+    fn drip_frame(
+        mut stream: UnixStream,
+        frame: Vec<u8>,
+        initial_delay: Duration,
+        gap: Duration,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            thread::sleep(initial_delay);
+            for (index, byte) in frame.into_iter().enumerate() {
+                if index != 0 {
+                    thread::sleep(gap);
+                }
+                if stream.write_all(&[byte]).is_err() {
+                    return;
+                }
+            }
+        })
     }
 }
