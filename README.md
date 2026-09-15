@@ -44,11 +44,57 @@ agentx-ifstack --version
 man agentx-ifstack
 ```
 
-The service runs as root because `/var/agentx` is normally root-owned with mode
-0700. It has no capabilities and writes no files. Its systemd sandbox permits
-Unix and netlink sockets in the host network namespace.
+The packaged unit runs as root by default because `/var/agentx` is normally
+root-owned with mode 0700. It has no capabilities and writes no files. Its
+systemd sandbox permits Unix and netlink sockets in the host network namespace.
 The unit orders itself after `snmpd.service` without pulling that service in.
 A missing master causes connection retries, not startup failure.
+
+To run the subagent without root, create a system group and user:
+
+```bash
+sudo groupadd --system agentx-ifstack
+sudo useradd --system --gid agentx-ifstack --no-create-home \
+  --home-dir /nonexistent --shell /usr/sbin/nologin agentx-ifstack
+```
+
+Add the master permission directive next to `master agentx` in
+`/etc/snmp/snmpd.conf`:
+
+```text
+agentXPerms 0660 0755 root agentx-ifstack
+```
+
+This setting makes a new AgentX socket mode 0660 and owned by
+`root:agentx-ifstack`. The socket controls access. Net-snmp uses the directory
+mode only when it creates a missing directory. It does not change the mode of
+an existing `/var/agentx`. If that directory already exists, the administrator
+must make it traversable by the `agentx-ifstack` user. For example, use mode
+0755 when the directory is owned by `root:root`.
+
+Create
+`/etc/systemd/system/agentx-ifstack.service.d/non-root.conf` with this content:
+
+```ini
+[Service]
+User=agentx-ifstack
+SupplementaryGroups=agentx-ifstack
+```
+
+Apply the master configuration and the drop-in:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart snmpd.service
+sudo systemctl restart agentx-ifstack.service
+```
+
+The package container tests start a real master. They use `setpriv` to run the
+packaged binary as the `agentx-ifstack` user and verify that it can register and
+publish rows through the configured socket. The containers do not run a service
+manager. These tests do not exercise the systemd drop-in, systemd's application
+of the supplementary group, or the unit sandbox. The shipped unit keeps
+`User=root`; the drop-in makes non-root operation an explicit choice.
 
 On Debian, `sudo apt remove agentx-ifstack` preserves the configuration;
 `sudo apt purge agentx-ifstack` removes it. On RPM distributions,
@@ -170,7 +216,10 @@ permits this upstream binary package to use Cargo metadata; its packaging
 changelog ships as the Debian changelog. Other RPM findings remain
 visible in CI. RPM contents and installation are checked by the Fedora job.
 The container checks use offline systemd inspection and do not exercise a live
-systemd service manager.
+systemd service manager. They start `snmpd` directly and use `setpriv` to start
+the packaged subagent as the non-root account. They verify the socket permission
+directive, registration, and published rows. They do not exercise the systemd
+drop-in, systemd's application of the supplementary group, or the unit sandbox.
 
 ## Table behaviour
 
@@ -305,9 +354,9 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
   `duplicateRegistration`. net-snmp does not own `1.3.6.1.2.1.31.1.2`, so there
   is no conflict with the running master or with lldpd.
 - `/var/agentx` is `drwx------ root root` and the socket is `srwxr-xr-x root
-  root`. lldpd connects because its monitor process runs as root. An
-  unprivileged subagent cannot traverse into `/var/agentx`, so either run as
-  root or set `agentXPerms` in `snmpd.conf`.
+  root`. lldpd connects because its monitor process runs as root. For an
+  unprivileged subagent, set `agentXPerms` in `snmpd.conf` and make an existing
+  `/var/agentx` traversable.
 - The master must reconnect cleanly. snmpd is restarted by configuration
   management, so the session loop needs to survive `AgentX master disconnected
   us` and re-register without supervision.

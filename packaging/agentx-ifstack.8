@@ -77,6 +77,49 @@ The
 .B RUST_LOG
 environment variable overrides the log filter.
 Restart the process to apply configuration changes.
+.SH NON-ROOT OPERATION
+The packaged systemd unit runs as root by default.
+To configure non-root operation, create a system group and user:
+.nf
+groupadd \-\-system agentx-ifstack
+useradd \-\-system \-\-gid agentx-ifstack \-\-no-create-home \e
+    \-\-home-dir /nonexistent \-\-shell /usr/sbin/nologin agentx-ifstack
+.fi
+.PP
+Add this permission directive next to
+.B master agentx
+in /etc/snmp/snmpd.conf:
+.nf
+agentXPerms 0660 0755 root agentx-ifstack
+.fi
+.PP
+This directive makes a new AgentX socket mode 0660 and owned by
+root:agentx-ifstack.
+The socket controls access.
+Net-snmp uses the directory mode only when it creates a missing directory.
+It does not change the mode of an existing /var/agentx.
+If that directory already exists, the administrator must make it traversable
+by the agentx-ifstack user.
+For example, use mode 0755 when the directory is owned by root:root.
+Create /etc/systemd/system/agentx-ifstack.service.d/non-root.conf with this
+content:
+.nf
+[Service]
+User=agentx-ifstack
+SupplementaryGroups=agentx-ifstack
+.fi
+.PP
+Reload the systemd configuration, restart snmpd.service, and restart
+agentx-ifstack.service.
+The package container tests start a real master and use setpriv to run the
+packaged binary as the agentx-ifstack user.
+They verify that it can register and publish rows through the configured
+socket.
+The containers do not run a service manager.
+The tests do not exercise the systemd drop-in, systemd's application of the
+supplementary group, or the unit sandbox.
+The shipped unit keeps
+.BR User=root .
 .SH FILES
 .TP
 .I /etc/agentx-ifstack.toml
@@ -93,8 +136,14 @@ A configuration or command-line error exits with status 1.
 During normal operation the process runs until terminated.
 Connection and acquisition failures do not terminate it.
 .SH NOTES
-The service runs as root because /var/agentx is normally mode 0700 and owned by root.
+The service runs as root by default because /var/agentx is normally mode 0700
+and owned by root.
 An unprivileged process cannot traverse that directory.
+The administrator must make an existing directory traversable.
+The non-root configuration uses
+.B agentXPerms
+to control socket access for the agentx-ifstack group.
+It uses a systemd drop-in to run the subagent as the agentx-ifstack user.
 The systemd unit removes all capabilities and permits Unix and netlink sockets.
 It reads the host network namespace directly through netlink.
 .PP
