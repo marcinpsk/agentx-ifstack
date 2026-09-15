@@ -5,7 +5,7 @@ package=$1
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
-dnf install -y iproute systemd rpm rpmlint man-db util-linux
+dnf install -y systemd rpm rpmlint man-db util-linux net-snmp net-snmp-utils
 command -v col >/dev/null
 rpm -qpl "$package"
 rpm -qpi "$package"
@@ -31,6 +31,7 @@ for document in README.md LICENSE-MIT LICENSE-APACHE; do
 done
 rpm -qc agentx-ifstack | grep -Fx /etc/agentx-ifstack.toml
 rpm -q --qf '[%{FILENAMES} %{FILEFLAGS:fflags}\n]' agentx-ifstack | grep -E '^/etc/agentx-ifstack.toml .*n'
+sh /work/packaging/non-root-agentx.sh
 cp /etc/agentx-ifstack.toml "$work/original-config"
 printf '\n# Local configuration edit.\n' >> /etc/agentx-ifstack.toml
 cp /etc/agentx-ifstack.toml "$work/expected-config"
