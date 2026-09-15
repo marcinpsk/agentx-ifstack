@@ -7,7 +7,7 @@ trap 'rm -rf "$work"' EXIT
 trap 'exit 1' HUP INT TERM
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends iproute2 systemd man-db bsdextrautils lintian
+apt-get install -y --no-install-recommends systemd man-db bsdextrautils lintian util-linux snmpd snmp
 command -v col >/dev/null
 lintian --fail-on error,warning "$package"
 dpkg -i "$package"
@@ -26,6 +26,7 @@ for document in README.md LICENSE-MIT LICENSE-APACHE; do
     test -f "/usr/share/doc/agentx-ifstack/$document"
 done
 dpkg-query -W -f='${Conffiles}\n' agentx-ifstack | grep -F ' /etc/agentx-ifstack.toml '
+sh /work/packaging/non-root-agentx.sh
 printf '\n# Local configuration edit.\n' >> /etc/agentx-ifstack.toml
 cp /etc/agentx-ifstack.toml "$work/expected-config"
 dpkg -i "$package"
