@@ -196,7 +196,7 @@ runs over that bond (9), so its row is `10.9`.
 
 Emit only direct relationships. A VLAN on a bond adds a `(VLAN, bond)` row.
 It does not add VLAN-to-member rows. Include zero-index rows for each
-missing side of the emitted stack. A plain interface has both `(0, index)`
+missing side of the emitted stack. A standalone interface has both `(0, index)`
 and `(index, 0)`. Consumers wanting only real relationships filter those rows.
 Counts of non-zero relationships exclude boundary rows. Tests assert the two sets separately.
 
@@ -330,4 +330,5 @@ ip -details -json link show
 
 A bond or bridge yields one row per member, with the master's ifIndex first. A
 VLAN yields one row with the VLAN's ifIndex first and its base interface second.
-Every interface also yields the two zero-index boundary rows RFC 2863 requires.
+An interface has a zero higher sub-layer row only if no interface runs over it.
+It has a zero lower sub-layer row only if it runs over no other interface.
