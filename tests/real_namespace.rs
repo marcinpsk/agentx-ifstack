@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::{fs::PermissionsExt, net::UnixStream, process::CommandExt};
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -27,6 +27,27 @@ struct Master {
     _directory: TempDir,
     agentx: AgentxMaster,
     child: Child,
+}
+
+struct LoggedSubagent {
+    child: Option<Child>,
+}
+
+impl LoggedSubagent {
+    fn stop(mut self) -> Output {
+        let mut child = self.child.take().expect("subagent is running");
+        child.kill().expect("stop test subagent");
+        child.wait_with_output().expect("reap test subagent")
+    }
+}
+
+impl Drop for LoggedSubagent {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 enum ProcessIdentity {
@@ -122,6 +143,67 @@ fn write_subagent_config(path: &Path, config: String) {
     fs::write(path, config).expect("write AgentX test config");
     fs::set_permissions(path, fs::Permissions::from_mode(0o444))
         .expect("make AgentX test config readable by the subagent user");
+}
+
+#[test]
+fn a_dripped_frame_ends_the_actual_binary_session_at_five_seconds() {
+    let directory = tempfile::tempdir().expect("create test directory");
+    let socket = directory.path().join("master");
+    let master = AgentxMaster::bind(&socket);
+    let config = directory.path().join("config.toml");
+    fs::write(&config, format!("socket = {socket:?}\n")).expect("write test configuration");
+    let child = Command::new(env!("CARGO_BIN_EXE_agentx-ifstack"))
+        .arg("--config")
+        .arg(config)
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start agentx-ifstack test process");
+    let subagent = LoggedSubagent { child: Some(child) };
+    let mut stream = master.connect(NETWORK_ORDER, 100, 127);
+    stream
+        .set_read_timeout(Some(Duration::from_secs(7)))
+        .expect("bound session-end wait");
+    let mut writer = stream.try_clone().expect("clone fake master socket");
+    let frame = header(Type::Ping, NETWORK_ORDER, 100, 3).to_bytes();
+    let (sent, received) = std::sync::mpsc::sync_channel(0);
+    let drip = std::thread::spawn(move || {
+        for (index, byte) in frame.into_iter().take(4).enumerate() {
+            if index != 0 {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            if writer.write_all(&[byte]).is_err() {
+                return;
+            }
+            if index == 0 {
+                sent.send(Instant::now()).expect("record first frame byte");
+            }
+        }
+    });
+
+    let started = received
+        .recv_timeout(Duration::from_secs(1))
+        .expect("first frame byte was sent");
+    let ended = stream.read(&mut [0]);
+    let elapsed = started.elapsed();
+    let _reconnected = matches!(ended, Ok(0)).then(|| master.connect(NETWORK_ORDER, 101, 127));
+    let output = subagent.stop();
+    drip.join().expect("join frame sender");
+    let stderr = String::from_utf8(output.stderr).expect("subagent logs are UTF-8");
+
+    assert!(
+        matches!(ended, Ok(0)),
+        "session remained open after {elapsed:?}: {ended:?}\n{stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(4_500) && elapsed < Duration::from_millis(6_500),
+        "session ended after {elapsed:?}, not about five seconds\n{stderr}"
+    );
+    assert!(
+        stderr.contains("AgentX session ended: AgentX PDU frame deadline"),
+        "session-end log did not name the frame deadline:\n{stderr}"
+    );
 }
 
 impl Drop for Master {
