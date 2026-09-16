@@ -124,13 +124,13 @@ impl Topology {
                         link.name, link.index, controller_index
                     ))
                 })?;
+                if controller.index == link.index {
+                    return Err(invalid(format!(
+                        "interface {:?} (index {}) references itself as controller",
+                        link.name, link.index
+                    )));
+                }
                 if matches!(controller.kind, LinkKind::Bond | LinkKind::Bridge) {
-                    if controller.index == link.index {
-                        return Err(invalid(format!(
-                            "interface {:?} (index {}) references itself as controller",
-                            link.name, link.index
-                        )));
-                    }
                     relationships.insert(StackRelationship {
                         higher: controller.index,
                         lower: link.index,
@@ -457,6 +457,10 @@ mod tests {
             (
                 ObservedLink::of_kind(13, "bridge", LinkKind::Bridge).with_controller(13),
                 "interface \"bridge\" (index 13) references itself as controller",
+            ),
+            (
+                ObservedLink::of_kind(14, "other", LinkKind::Other).with_controller(14),
+                "interface \"other\" (index 14) references itself as controller",
             ),
         ] {
             assert_rejected_with_message(vec![link], expected);

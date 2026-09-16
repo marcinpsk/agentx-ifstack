@@ -44,6 +44,9 @@
         if (higher == 0 && lower == 0) {
             reject("walk returned the invalid boundary row 0.0")
         } else if (higher != 0 && lower != 0) {
+            if (higher == lower) {
+                reject("relationship row names interface " higher " on both sides")
+            }
             if (!(higher in expected_interfaces)) {
                 reject("relationship row names an unknown interface: " higher)
             }

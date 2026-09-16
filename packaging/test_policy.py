@@ -1095,6 +1095,10 @@ class PackagingPolicyTests(unittest.TestCase):
             "unexpected zero-higher boundary row for interface 9",
         )
 
+    def test_walk_check_rejects_an_interface_that_stacks_on_itself(self):
+        """A relationship row may not name one interface on both sides."""
+        self.assert_walk_rejected([1, 2], ["0.2", "1.1", "2.0"], "on both sides")
+
     def test_walk_check_rejects_a_missing_boundary_row(self):
         """Every side of the stack that no relationship covers needs its row."""
         self.assert_walk_rejected(
