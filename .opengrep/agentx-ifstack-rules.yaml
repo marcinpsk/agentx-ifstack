@@ -48,13 +48,44 @@ rules:
     paths:
       exclude:
         - "tests/**"
+    options:
+      go_deeper_expr: false
+      go_deeper_stmt: false
+      implicit_deep_exprstmt: false
     patterns:
-      - pattern: |
-          StackRelationship { higher: $HIGHER, lower: $LOWER }
-      # The guard may sit in an enclosing block, so the trailing ... spans nested blocks.
-      - pattern-not-inside: |
-          if $HIGHER == $LOWER { ... }
-          ...
-      - pattern-not-inside: |
-          if $LOWER == $HIGHER { ... }
-          ...
+      - pattern-either:
+          # A relationship built inside the equality branch is never a rejection,
+          # even when a terminating statement follows it.
+          - patterns:
+              - pattern: |
+                  StackRelationship { higher: $HIGHER, lower: $LOWER }
+              - pattern-either:
+                  - pattern-inside: |
+                      if $HIGHER == $LOWER { ... }
+                  - pattern-inside: |
+                      if $LOWER == $HIGHER { ... }
+          - patterns:
+              - pattern: |
+                  StackRelationship { higher: $HIGHER, lower: $LOWER }
+              # The guard may sit in an enclosing block, so the trailing ellipsis spans
+              # nested blocks. Anchor the terminator as the equality branch's last
+              # statement. The leading ellipsis then covers any direct observations but
+              # does not treat a return nested in a conditional as unconditional.
+              - pattern-not-inside: |
+                  if $HIGHER == $LOWER { ... return $VALUE; }
+                  ...
+              - pattern-not-inside: |
+                  if $LOWER == $HIGHER { ... return $VALUE; }
+                  ...
+              - pattern-not-inside: |
+                  if $HIGHER == $LOWER { ... return; }
+                  ...
+              - pattern-not-inside: |
+                  if $LOWER == $HIGHER { ... return; }
+                  ...
+              - pattern-not-inside: |
+                  if $HIGHER == $LOWER { ... continue; }
+                  ...
+              - pattern-not-inside: |
+                  if $LOWER == $HIGHER { ... continue; }
+                  ...

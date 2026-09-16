@@ -9,6 +9,319 @@ fn unguarded(peer: u32, link: &Link, relationships: &mut BTreeSet<StackRelations
     });
 }
 
+fn guard_that_only_logs(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if link.index == peer {
+        log::warn!("self reference");
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn reversed_guard_that_only_logs(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if peer == link.index {
+        log::warn!("self reference");
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn guard_that_rejects_after_inserting(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        // ruleid: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+        return Err(invalid("self"));
+    }
+    Ok(())
+}
+
+fn guarded_with_bare_return(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if link.index == peer {
+        return;
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn reversed_guard_with_bare_return(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if peer == link.index {
+        return;
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn bare_return_after_logging(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if link.index == peer {
+        log::warn!("self reference");
+        return;
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn guarded_after_logging(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        log::warn!("self reference");
+        return Err(invalid("self"));
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+    Ok(())
+}
+
+fn reversed_guard_after_logging(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if peer == link.index {
+        log::warn!("self reference");
+        return Err(invalid("self"));
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+    Ok(())
+}
+
+fn guarded_after_multiple_observations(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        metrics::counter!("self_reference").increment(1);
+        log::warn!("self reference");
+        return Err(invalid("self"));
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+    Ok(())
+}
+
+fn guarded_with_continue(
+    peers: &[u32],
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    for peer in peers.iter().copied() {
+        if link.index == peer {
+            continue;
+        }
+        // ok: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+    }
+}
+
+fn reversed_guard_with_continue(
+    peers: &[u32],
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    for peer in peers.iter().copied() {
+        if peer == link.index {
+            continue;
+        }
+        // ok: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+    }
+}
+
+fn continue_after_logging(
+    peers: &[u32],
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    for peer in peers.iter().copied() {
+        if link.index == peer {
+            log::warn!("self reference");
+            continue;
+        }
+        // ok: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+    }
+}
+
+fn conditionally_guarded_with_error(
+    enabled: bool,
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        if enabled {
+            return Err(invalid("self"));
+        }
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+    Ok(())
+}
+
+fn conditionally_guarded_with_bare_return(
+    enabled: bool,
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if peer == link.index {
+        if enabled {
+            return;
+        }
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn conditionally_guarded_with_continue(
+    enabled: bool,
+    peers: &[u32],
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    for peer in peers.iter().copied() {
+        if link.index == peer {
+            if enabled {
+                continue;
+            }
+        }
+        // ruleid: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+    }
+}
+
+fn logging_before_conditional_error(
+    enabled: bool,
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        log::warn!("self reference");
+        if enabled {
+            return Err(invalid("self"));
+        }
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+    Ok(())
+}
+
+fn logging_before_conditional_bare_return(
+    enabled: bool,
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    if link.index == peer {
+        log::warn!("self reference");
+        if enabled {
+            return;
+        }
+    }
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        higher: link.index,
+        lower: peer,
+    });
+}
+
+fn logging_before_conditional_continue(
+    enabled: bool,
+    peers: &[u32],
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    for peer in peers.iter().copied() {
+        if link.index == peer {
+            log::warn!("self reference");
+            if enabled {
+                continue;
+            }
+        }
+        // ruleid: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            higher: link.index,
+            lower: peer,
+        });
+    }
+}
+
 fn guarded_with_shorthand_field(
     lower: u32,
     link: &Link,
