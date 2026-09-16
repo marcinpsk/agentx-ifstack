@@ -28,3 +28,33 @@ rules:
       - pattern-not-inside: |
           #[cfg(test)]
           mod $_ { ... }
+
+  - id: agentx-stack-relationship-without-self-guard
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      This stack relationship is built without rejecting a self reference first. RFC 2863
+      has no row where an interface runs over itself, and Topology::from_observed rejects
+      such an inventory. Reject higher == lower before the insert.
+      Limit: this rule sees a missing guard, not a misplaced one. A guard nested inside a
+      filter that skips some inputs still matches. The exhaustive self reference test in
+      src/link.rs covers that case.
+    metadata:
+      category: correctness
+      confidence: HIGH
+      references:
+        - "CLAUDE.md: reject remote and self lower-interface references"
+        - "RFC 2863 ifStackTable: a sub-layer does not run over itself"
+    paths:
+      exclude:
+        - "tests/**"
+    patterns:
+      - pattern: |
+          StackRelationship { higher: $HIGHER, lower: $LOWER }
+      # The guard may sit in an enclosing block, so the trailing ... spans nested blocks.
+      - pattern-not-inside: |
+          if $HIGHER == $LOWER { ... }
+          ...
+      - pattern-not-inside: |
+          if $LOWER == $HIGHER { ... }
+          ...

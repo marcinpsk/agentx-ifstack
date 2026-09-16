@@ -427,6 +427,45 @@ mod tests {
         }
     }
 
+    fn every_link_kind() -> [LinkKind; 9] {
+        let kinds = [
+            LinkKind::Bond,
+            LinkKind::Bridge,
+            LinkKind::Vlan,
+            LinkKind::MacVlan,
+            LinkKind::IpVlan,
+            LinkKind::MacVtap,
+            LinkKind::Vxlan,
+            LinkKind::Veth,
+            LinkKind::Other,
+        ];
+        for kind in kinds {
+            // No wildcard arm: a new kind must join the array above before this compiles.
+            match kind {
+                LinkKind::Bond
+                | LinkKind::Bridge
+                | LinkKind::Vlan
+                | LinkKind::MacVlan
+                | LinkKind::IpVlan
+                | LinkKind::MacVtap
+                | LinkKind::Vxlan
+                | LinkKind::Veth
+                | LinkKind::Other => {}
+            }
+        }
+        kinds
+    }
+
+    #[test]
+    fn a_self_controller_is_rejected_for_every_link_kind() {
+        for kind in every_link_kind() {
+            assert_rejected_with_message(
+                vec![ObservedLink::of_kind(7, "self", kind).with_controller(7)],
+                "interface \"self\" (index 7) references itself as controller",
+            );
+        }
+    }
+
     #[test]
     fn self_stack_error_names_the_interface_and_self_reference() {
         for (link, expected) in [
