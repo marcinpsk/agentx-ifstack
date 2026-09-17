@@ -952,6 +952,177 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertEqual(shipped["reconcile"], 3600)
         self.assertNotIn("refresh", shipped)
 
+    def test_every_distribution_package_test_runs_the_non_root_scenario(self):
+        """A distribution package test must prove access through agentXPerms."""
+        expected = ["sh", "/work/packaging/non-root-agentx.sh"]
+        scripts = sorted((ROOT / "packaging").glob("test-*.sh"))
+        self.assertTrue(scripts, "no distribution package test scripts found")
+        missing = [
+            path.name
+            for path in scripts
+            if expected not in shell_commands(path.read_text())
+        ]
+        self.assertEqual(
+            missing,
+            [],
+            "distribution package tests missing the non-root AgentX scenario",
+        )
+
+    def test_non_root_documentation_matches_the_net_snmp_permission_model(self):
+        """The recipe must separate directory traversal from socket access."""
+        directive = "agentXPerms 0660 0755 root agentx-ifstack"
+        for name in ("README.md", "packaging/agentx-ifstack.8"):
+            text = (ROOT / name).read_text()
+            if name == "README.md":
+                section = text.split("To run the subagent without root", 1)[1]
+                section = section.split("On Debian,", 1)[0]
+            else:
+                section = text.split(".SH NON-ROOT OPERATION", 1)[1]
+                section = section.split(".SH FILES", 1)[0]
+            self.assertIn(directive, section, name)
+            self.assertNotIn("agentXPerms 0660 0770", section, name)
+            self.assertIn("existing", section, name)
+            self.assertIn("traversable", section, name)
+            self.assertIn("setpriv", section, name)
+            self.assertIn("do not exercise", section, name)
+
+    def test_non_root_scenario_handles_agentx_permissions_safely(self):
+        """The scenario must wait for final metadata and preserve prior state."""
+        source = (ROOT / "packaging/non-root-agentx.sh").read_text()
+        self.assertIn("agentXPerms 0660 0755 root $subagent_group", source)
+        self.assertLess(
+            source.index('if [ -L "$agentx_dir" ]'),
+            source.index("agentx_dir_existed=yes"),
+        )
+        self.assertRegex(
+            source,
+            r'(?s)created_user.*getent passwd "\$subagent_user".*userdel '
+            r'"\$subagent_user"',
+        )
+        self.assertRegex(
+            source,
+            r'(?s)created_group.*getent group "\$subagent_group".*groupdel '
+            r'"\$subagent_group"',
+        )
+        socket_wait = source.split("master_pid=$!", 1)[1].split("done", 1)[0]
+        self.assertIn("660:0:$subagent_gid", socket_wait)
+        self.assertIn('stat -c \'%g\' "$agentx_dir")" = 0', source)
+        self.assertIn('test -x "$agentx_dir"', source)
+
+    def test_non_root_scenario_attributes_rows_to_the_non_root_child(self):
+        """Published rows must come from the child and match kernel interfaces."""
+        source = (ROOT / "packaging/non-root-agentx.sh").read_text()
+        launch = source.index("/usr/bin/agentx-ifstack")
+        self.assertLess(source.index('"$work/pre-subagent.walk"'), launch)
+        self.assertIn('"/proc/$subagent_pid/status"', source)
+        self.assertIn("/sys/class/net/*/ifindex", source)
+        self.assertIn('-v expected_indexes="$work/interface-indexes"', source)
+        self.assertIn(
+            "agentx-ifstack did not register and publish rows after 30 attempts",
+            source,
+        )
+        self.assertNotIn(
+            "agentx-ifstack did not register and publish rows within 30 seconds",
+            source,
+        )
+
+    def test_non_root_scenario_treats_the_manual_as_diagnostic_output(self):
+        """Manual rendering must not decide whether the runtime scenario passes."""
+        source = (ROOT / "packaging/non-root-agentx.sh").read_text()
+        manual = source.split("MANWIDTH=", 1)[1].split(
+            'cat > "$work/snmpd.conf"', 1
+        )[0]
+        self.assertIn("Installed snmpd.conf agentXPerms section:", manual)
+        self.assertIn("The installed snmpd.conf manual page is missing.", manual)
+        self.assertNotIn("manual_signature=", manual)
+        self.assertNotIn("expected_signature=", manual)
+        self.assertNotIn("fail ", manual)
+
+    def run_walk_check(self, interfaces, rows):
+        """Run the shipped walk validator over one synthetic ifStackTable walk."""
+        prefix = ".1.3.6.1.2.1.31.1.2.1.3."
+        with tempfile.TemporaryDirectory() as work:
+            indexes = Path(work) / "interface-indexes"
+            indexes.write_text("".join(f"{index}\n" for index in interfaces))
+            walk = Path(work) / "ifstack.walk"
+            walk.write_text(
+                "".join(f"{prefix}{row} = INTEGER: 1\n" for row in rows)
+            )
+            return subprocess.run(
+                [
+                    "awk",
+                    "-v", f"prefix={prefix}",
+                    "-v", f"expected_indexes={indexes}",
+                    "-f", str(ROOT / "packaging/ifstack-walk-check.awk"),
+                    str(walk),
+                ],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+
+    def assert_walk_accepted(self, interfaces, rows):
+        result = self.run_walk_check(interfaces, rows)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def assert_walk_rejected(self, interfaces, rows, reason):
+        result = self.run_walk_check(interfaces, rows)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(reason, result.stderr)
+
+    def test_non_root_scenario_runs_the_shipped_walk_validator(self):
+        """The scenario must validate through the file these tests exercise."""
+        source = (ROOT / "packaging/non-root-agentx.sh").read_text()
+        self.assertIn("ifstack-walk-check.awk", source)
+        self.assertTrue((ROOT / "packaging/ifstack-walk-check.awk").is_file())
+        self.assertNotIn("zero_higher[", source)
+
+    def test_walk_check_accepts_a_standalone_topology(self):
+        """Interfaces that stack on nothing carry both boundary rows."""
+        self.assert_walk_accepted([1, 2], ["0.1", "0.2", "1.0", "2.0"])
+
+    def test_walk_check_accepts_a_bond_over_one_member(self):
+        """A relationship row is valid, and it removes one boundary row per side."""
+        self.assert_walk_accepted([3, 9], ["0.9", "3.0", "9.3"])
+
+    def test_walk_check_accepts_a_vlan_over_a_bond_over_a_member(self):
+        """A bond between a VLAN and a member carries no boundary row at all."""
+        self.assert_walk_accepted([3, 9, 10], ["0.10", "3.0", "9.3", "10.9"])
+
+    def test_walk_check_rejects_a_boundary_row_the_relationships_exclude(self):
+        """A zero-higher row is wrong when another interface runs over it."""
+        self.assert_walk_rejected(
+            [3, 9, 10],
+            ["0.9", "0.10", "3.0", "9.3", "10.9"],
+            "unexpected zero-higher boundary row for interface 9",
+        )
+
+    def test_walk_check_rejects_an_interface_that_stacks_on_itself(self):
+        """A relationship row may not name one interface on both sides."""
+        self.assert_walk_rejected([1, 2], ["0.2", "1.1", "2.0"], "on both sides")
+
+    def test_walk_check_rejects_a_missing_boundary_row(self):
+        """Every side of the stack that no relationship covers needs its row."""
+        self.assert_walk_rejected(
+            [1, 2], ["0.1", "0.2", "1.0"], "missing zero-lower boundary row"
+        )
+
+    def test_walk_check_rejects_an_unknown_interface(self):
+        """A row must name an interface the container actually has."""
+        self.assert_walk_rejected(
+            [1, 2],
+            ["0.1", "0.2", "1.0", "2.0", "7.0"],
+            "unknown interface",
+        )
+
+    def test_walk_check_rejects_rows_outside_rfc_index_order(self):
+        """GETNEXT walks depend on the index order."""
+        self.assert_walk_rejected(
+            [1, 2], ["0.2", "0.1", "1.0", "2.0"], "not in RFC index order"
+        )
+
+    def test_walk_check_rejects_an_empty_walk(self):
+        """An empty walk proves nothing."""
+        self.assert_walk_rejected([1], [], "returned no rows")
+
     def test_runtime_package_dependency_check_matches_variants(self):
         """A distribution-specific package suffix must not bypass the guard."""
         self.assertEqual(

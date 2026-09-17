@@ -148,7 +148,8 @@ ip -details -json link show
 
 A bond or bridge yields one row per member, with the master's ifIndex first. A
 VLAN yields one row with the VLAN's ifIndex first and its base interface second.
-Every interface also yields the two zero-index boundary rows RFC 2863 requires.
+An interface has a zero higher sub-layer row only if no interface runs over it.
+It has a zero lower sub-layer row only if it runs over no other interface.
 
 ## Prior art worth reading before writing the session loop
 

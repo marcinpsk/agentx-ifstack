@@ -84,23 +84,52 @@ pub struct Topology {
 
 impl Topology {
     pub fn from_observed(links: Vec<ObservedLink>) -> Result<Self> {
-        let mut by_index = BTreeMap::new();
-        let mut names = BTreeSet::new();
+        let mut by_index: BTreeMap<u32, &ObservedLink> = BTreeMap::new();
+        let mut by_name: BTreeMap<&str, &ObservedLink> = BTreeMap::new();
         for link in &links {
-            if link.index == 0 || link.index > i32::MAX as u32 || link.name.is_empty() {
-                return Err(invalid("invalid interface index or name"));
+            if link.index == 0 || link.index > i32::MAX as u32 {
+                return Err(invalid(format!(
+                    "interface {:?} has invalid index {}",
+                    link.name, link.index
+                )));
             }
-            if by_index.insert(link.index, link).is_some() || !names.insert(link.name.as_str()) {
-                return Err(invalid("duplicate interface index or name"));
+            if link.name.is_empty() {
+                return Err(invalid(format!(
+                    "interface at index {} has an empty name",
+                    link.index
+                )));
             }
+            if let Some(existing) = by_index.get(&link.index) {
+                return Err(invalid(format!(
+                    "interface {:?} duplicates index {} of interface {:?}",
+                    link.name, link.index, existing.name
+                )));
+            }
+            if let Some(existing) = by_name.get(link.name.as_str()) {
+                return Err(invalid(format!(
+                    "interface {:?} (index {}) duplicates the name of interface at index {}",
+                    link.name, link.index, existing.index
+                )));
+            }
+            by_index.insert(link.index, link);
+            by_name.insert(link.name.as_str(), link);
         }
 
         let mut relationships = BTreeSet::new();
         for link in &links {
-            if let Some(controller) = link.controller {
-                let controller = by_index
-                    .get(&controller)
-                    .ok_or_else(|| invalid("unknown controller interface"))?;
+            if let Some(controller_index) = link.controller {
+                let controller = by_index.get(&controller_index).ok_or_else(|| {
+                    invalid(format!(
+                        "interface {:?} (index {}) references unknown controller index {}",
+                        link.name, link.index, controller_index
+                    ))
+                })?;
+                if controller.index == link.index {
+                    return Err(invalid(format!(
+                        "interface {:?} (index {}) references itself as controller",
+                        link.name, link.index
+                    )));
+                }
                 if matches!(controller.kind, LinkKind::Bond | LinkKind::Bridge) {
                     relationships.insert(StackRelationship {
                         higher: controller.index,
@@ -111,14 +140,29 @@ impl Topology {
 
             match link.kind {
                 LinkKind::Vlan | LinkKind::MacVlan | LinkKind::IpVlan | LinkKind::MacVtap => {
+                    let lower = link.lower.ok_or_else(|| {
+                        invalid(format!(
+                            "interface {:?} (index {}) has no lower sub-layer reference",
+                            link.name, link.index
+                        ))
+                    })?;
                     if link.lower_netnsid.is_some() {
-                        return Err(invalid("lower interface is in another network namespace"));
+                        return Err(invalid(format!(
+                            "interface {:?} (index {}) references lower sub-layer index {} in another network namespace",
+                            link.name, link.index, lower
+                        )));
                     }
-                    let lower = link
-                        .lower
-                        .ok_or_else(|| invalid("missing lower interface"))?;
+                    if lower == link.index {
+                        return Err(invalid(format!(
+                            "interface {:?} (index {}) references itself as lower sub-layer",
+                            link.name, link.index
+                        )));
+                    }
                     if !by_index.contains_key(&lower) {
-                        return Err(invalid("unknown lower interface"));
+                        return Err(invalid(format!(
+                            "interface {:?} (index {}) references unknown lower sub-layer index {}",
+                            link.name, link.index, lower
+                        )));
                     }
                     relationships.insert(StackRelationship {
                         higher: link.index,
@@ -129,6 +173,12 @@ impl Topology {
                     if let Some(lower) = link.vxlan_lower
                         && by_index.contains_key(&lower)
                     {
+                        if lower == link.index {
+                            return Err(invalid(format!(
+                                "interface {:?} (index {}) references itself as lower sub-layer",
+                                link.name, link.index
+                            )));
+                        }
                         relationships.insert(StackRelationship {
                             higher: link.index,
                             lower,
@@ -137,13 +187,6 @@ impl Topology {
                 }
                 _ => {}
             }
-        }
-
-        if relationships
-            .iter()
-            .any(|relationship| relationship.higher == relationship.lower)
-        {
-            return Err(invalid("interface cannot stack on itself"));
         }
 
         Ok(Self {
@@ -161,8 +204,8 @@ impl Topology {
     }
 }
 
-fn invalid(message: &str) -> Error {
-    Error::new(ErrorKind::InvalidData, message)
+fn invalid(message: impl Into<String>) -> Error {
+    Error::new(ErrorKind::InvalidData, message.into())
 }
 
 #[cfg(test)]
@@ -251,36 +294,215 @@ mod tests {
         }
     }
 
-    #[test]
-    fn malformed_interfaces_and_supported_references_reject_the_inventory() {
-        let invalid_cases = [
-            vec![ObservedLink::plain(0, "zero")],
-            vec![ObservedLink::plain(i32::MAX as u32 + 1, "large")],
-            vec![ObservedLink::plain(1, "")],
-            vec![ObservedLink::plain(1, "one"), ObservedLink::plain(1, "two")],
-            vec![
-                ObservedLink::plain(1, "same"),
-                ObservedLink::plain(2, "same"),
-            ],
-            vec![ObservedLink::plain(1, "one").with_controller(99)],
-            vec![ObservedLink::of_kind(1, "vlan", LinkKind::Vlan)],
-            vec![
-                ObservedLink::plain(1, "one"),
-                ObservedLink::of_kind(2, "vlan", LinkKind::Vlan).with_lower(99),
-            ],
-            vec![
-                ObservedLink::plain(1, "one"),
-                ObservedLink::of_kind(2, "vlan", LinkKind::Vlan).with_remote_lower(1),
-            ],
-            vec![ObservedLink::of_kind(1, "vlan", LinkKind::Vlan).with_lower(1)],
-            vec![ObservedLink::of_kind(1, "bond", LinkKind::Bond).with_controller(1)],
-        ];
+    fn assert_rejected_with_message(links: Vec<ObservedLink>, expected: &str) {
+        let error = Topology::from_observed(links).expect_err("accepted invalid inventory");
 
-        for links in invalid_cases {
-            assert!(
-                Topology::from_observed(links.clone()).is_err(),
-                "accepted {links:?}"
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), expected);
+    }
+
+    #[test]
+    fn invalid_index_error_names_the_interface_and_invalid_index() {
+        for (link, expected) in [
+            (
+                ObservedLink::plain(0, "zero"),
+                "interface \"zero\" has invalid index 0",
+            ),
+            (
+                ObservedLink::plain(i32::MAX as u32 + 1, "large"),
+                "interface \"large\" has invalid index 2147483648",
+            ),
+        ] {
+            assert_rejected_with_message(vec![link], expected);
+        }
+    }
+
+    #[test]
+    fn invalid_name_error_names_the_interface_and_invalid_name() {
+        assert_rejected_with_message(
+            vec![ObservedLink::plain(7, "")],
+            "interface at index 7 has an empty name",
+        );
+    }
+
+    #[test]
+    fn duplicate_index_error_names_the_interface_and_duplicate_index() {
+        assert_rejected_with_message(
+            vec![
+                ObservedLink::plain(7, "first"),
+                ObservedLink::plain(7, "second"),
+            ],
+            "interface \"second\" duplicates index 7 of interface \"first\"",
+        );
+    }
+
+    #[test]
+    fn duplicate_name_error_names_the_interface_and_duplicate_name() {
+        assert_rejected_with_message(
+            vec![
+                ObservedLink::plain(7, "same"),
+                ObservedLink::plain(8, "same"),
+            ],
+            "interface \"same\" (index 8) duplicates the name of interface at index 7",
+        );
+    }
+
+    #[test]
+    fn unknown_controller_error_names_the_interface_and_controller_index() {
+        assert_rejected_with_message(
+            vec![ObservedLink::plain(7, "member").with_controller(99)],
+            "interface \"member\" (index 7) references unknown controller index 99",
+        );
+    }
+
+    #[test]
+    fn missing_lower_error_names_the_interface_and_missing_reference() {
+        for (link, expected) in [
+            (
+                ObservedLink::of_kind(7, "vlan", LinkKind::Vlan),
+                "interface \"vlan\" (index 7) has no lower sub-layer reference",
+            ),
+            (
+                ObservedLink::of_kind(8, "macvlan", LinkKind::MacVlan),
+                "interface \"macvlan\" (index 8) has no lower sub-layer reference",
+            ),
+            (
+                ObservedLink::of_kind(9, "ipvlan", LinkKind::IpVlan),
+                "interface \"ipvlan\" (index 9) has no lower sub-layer reference",
+            ),
+            (
+                ObservedLink::of_kind(10, "macvtap", LinkKind::MacVtap),
+                "interface \"macvtap\" (index 10) has no lower sub-layer reference",
+            ),
+        ] {
+            assert_rejected_with_message(vec![link], expected);
+        }
+    }
+
+    #[test]
+    fn unknown_lower_error_names_the_interface_and_lower_index() {
+        for (link, expected) in [
+            (
+                ObservedLink::of_kind(7, "vlan", LinkKind::Vlan).with_lower(99),
+                "interface \"vlan\" (index 7) references unknown lower sub-layer index 99",
+            ),
+            (
+                ObservedLink::of_kind(8, "macvlan", LinkKind::MacVlan).with_lower(98),
+                "interface \"macvlan\" (index 8) references unknown lower sub-layer index 98",
+            ),
+            (
+                ObservedLink::of_kind(9, "ipvlan", LinkKind::IpVlan).with_lower(97),
+                "interface \"ipvlan\" (index 9) references unknown lower sub-layer index 97",
+            ),
+            (
+                ObservedLink::of_kind(10, "macvtap", LinkKind::MacVtap).with_lower(96),
+                "interface \"macvtap\" (index 10) references unknown lower sub-layer index 96",
+            ),
+        ] {
+            assert_rejected_with_message(vec![link], expected);
+        }
+    }
+
+    #[test]
+    fn remote_lower_error_names_the_interface_and_lower_index() {
+        for (link, expected) in [
+            (
+                ObservedLink::of_kind(7, "vlan", LinkKind::Vlan).with_remote_lower(99),
+                "interface \"vlan\" (index 7) references lower sub-layer index 99 in another network namespace",
+            ),
+            (
+                ObservedLink::of_kind(8, "macvlan", LinkKind::MacVlan).with_remote_lower(98),
+                "interface \"macvlan\" (index 8) references lower sub-layer index 98 in another network namespace",
+            ),
+            (
+                ObservedLink::of_kind(9, "ipvlan", LinkKind::IpVlan).with_remote_lower(97),
+                "interface \"ipvlan\" (index 9) references lower sub-layer index 97 in another network namespace",
+            ),
+            (
+                ObservedLink::of_kind(10, "macvtap", LinkKind::MacVtap).with_remote_lower(96),
+                "interface \"macvtap\" (index 10) references lower sub-layer index 96 in another network namespace",
+            ),
+        ] {
+            assert_rejected_with_message(vec![link], expected);
+        }
+    }
+
+    fn every_link_kind() -> [LinkKind; 9] {
+        let kinds = [
+            LinkKind::Bond,
+            LinkKind::Bridge,
+            LinkKind::Vlan,
+            LinkKind::MacVlan,
+            LinkKind::IpVlan,
+            LinkKind::MacVtap,
+            LinkKind::Vxlan,
+            LinkKind::Veth,
+            LinkKind::Other,
+        ];
+        for kind in kinds {
+            // No wildcard arm: a new kind must join the array above before this compiles.
+            match kind {
+                LinkKind::Bond
+                | LinkKind::Bridge
+                | LinkKind::Vlan
+                | LinkKind::MacVlan
+                | LinkKind::IpVlan
+                | LinkKind::MacVtap
+                | LinkKind::Vxlan
+                | LinkKind::Veth
+                | LinkKind::Other => {}
+            }
+        }
+        kinds
+    }
+
+    #[test]
+    fn a_self_controller_is_rejected_for_every_link_kind() {
+        for kind in every_link_kind() {
+            assert_rejected_with_message(
+                vec![ObservedLink::of_kind(7, "self", kind).with_controller(7)],
+                "interface \"self\" (index 7) references itself as controller",
             );
+        }
+    }
+
+    #[test]
+    fn self_stack_error_names_the_interface_and_self_reference() {
+        for (link, expected) in [
+            (
+                ObservedLink::of_kind(7, "vlan", LinkKind::Vlan).with_lower(7),
+                "interface \"vlan\" (index 7) references itself as lower sub-layer",
+            ),
+            (
+                ObservedLink::of_kind(8, "macvlan", LinkKind::MacVlan).with_lower(8),
+                "interface \"macvlan\" (index 8) references itself as lower sub-layer",
+            ),
+            (
+                ObservedLink::of_kind(9, "ipvlan", LinkKind::IpVlan).with_lower(9),
+                "interface \"ipvlan\" (index 9) references itself as lower sub-layer",
+            ),
+            (
+                ObservedLink::of_kind(10, "macvtap", LinkKind::MacVtap).with_lower(10),
+                "interface \"macvtap\" (index 10) references itself as lower sub-layer",
+            ),
+            (
+                ObservedLink::of_kind(11, "vxlan", LinkKind::Vxlan).with_vxlan_lower(11),
+                "interface \"vxlan\" (index 11) references itself as lower sub-layer",
+            ),
+            (
+                ObservedLink::of_kind(12, "bond", LinkKind::Bond).with_controller(12),
+                "interface \"bond\" (index 12) references itself as controller",
+            ),
+            (
+                ObservedLink::of_kind(13, "bridge", LinkKind::Bridge).with_controller(13),
+                "interface \"bridge\" (index 13) references itself as controller",
+            ),
+            (
+                ObservedLink::of_kind(14, "other", LinkKind::Other).with_controller(14),
+                "interface \"other\" (index 14) references itself as controller",
+            ),
+        ] {
+            assert_rejected_with_message(vec![link], expected);
         }
     }
 
