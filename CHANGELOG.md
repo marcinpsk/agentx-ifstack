@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.2 (2026-09-17)
+
+### Bug Fixes
+
+- Harden AgentX validation and package checks
+  ([#24](https://github.com/marcinpsk/agentx-ifstack/pull/24),
+  [`0b3971e`](https://github.com/marcinpsk/agentx-ifstack/commit/0b3971e31917e249dc284a5285db15a93a95d5ec))
+
+
 ## v0.2.1 (2026-09-14)
 
 ### Bug Fixes
