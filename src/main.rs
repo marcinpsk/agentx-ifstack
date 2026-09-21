@@ -3,6 +3,7 @@ mod link;
 mod mib;
 mod monitor;
 mod netlink;
+mod notify;
 mod session;
 
 use std::path::Path;
@@ -54,7 +55,7 @@ fn main() -> ExitCode {
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = Instant::now();
-        match session::run(&config, &tables) {
+        match session::run(&config, &tables, &notify::ready) {
             Ok(()) => log::warn!("AgentX master closed the session"),
             Err(error) => log::warn!("AgentX session ended: {error}"),
         }

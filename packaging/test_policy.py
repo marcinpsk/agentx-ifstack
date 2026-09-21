@@ -581,6 +581,14 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "60s")
         self.assertEqual(unit["Unit"].getint("StartLimitBurst"), 3)
 
+    def test_the_unit_reports_active_only_once_the_table_is_registered(self):
+        """A subagent that never registers serves nothing, and must not look healthy."""
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(ROOT / "packaging/agentx-ifstack.service")
+        self.assertEqual(unit["Service"]["Type"], "notify")
+        self.assertEqual(unit["Service"]["NotifyAccess"], "main")
+        self.assertEqual(unit["Service"]["TimeoutStartSec"], "60s")
+
     def test_third_party_actions_are_pinned_to_full_commit_shas(self):
         """A movable tag lets a compromised action change what CI and releases run."""
         unpinned = []
