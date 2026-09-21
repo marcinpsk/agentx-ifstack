@@ -51,7 +51,8 @@ The unit orders itself after `snmpd.service` without pulling that service in.
 A missing master causes connection retries. The unit is `Type=notify` and reports
 `READY=1` only once it registers the table, so `systemctl start` reports success
 when the subagent serves rows, and fails at `TimeoutStartSec` when no master
-answers the retries.
+answers the retries. systemd then restarts the unit, and the start limit stops it
+after three attempts rather than retrying for ever.
 
 To run the subagent without root, create a system group and user:
 

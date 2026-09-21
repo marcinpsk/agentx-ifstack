@@ -1,7 +1,9 @@
 [Unit]
 Description=AgentX ifStackTable subagent
 After=snmpd.service
-StartLimitIntervalSec=60s
+# Wide enough to hold the three start attempts it counts. A window shorter
+# than an attempt resets between them, and the limit never stops the retries.
+StartLimitIntervalSec=10min
 StartLimitBurst=3
 
 [Service]
