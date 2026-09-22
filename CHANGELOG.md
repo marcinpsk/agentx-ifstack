@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.2.3 (2026-09-22)
+
+### Bug Fixes
+
+- Topology ([#25](https://github.com/marcinpsk/agentx-ifstack/pull/25),
+  [`17c9efa`](https://github.com/marcinpsk/agentx-ifstack/commit/17c9efab884f8a5e99e06134f2207e7ad31673e7))
+
+
 ## v0.2.2 (2026-09-17)
 
 ### Bug Fixes
