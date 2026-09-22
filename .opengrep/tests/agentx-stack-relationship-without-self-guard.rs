@@ -378,3 +378,58 @@ fn guard_misplaced_inside_the_filter(
     }
     Ok(())
 }
+
+// Rust accepts the fields in either order, so the rule must see both. A reversed
+// construction without a guard is the same defect as the forward one.
+fn unguarded_with_reversed_field_order(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        lower: peer,
+        higher: link.index,
+    });
+}
+
+fn unguarded_with_reversed_shorthand_fields(
+    lower: u32,
+    higher: u32,
+    relationships: &mut BTreeSet<StackRelationship>,
+) {
+    // ruleid: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship { lower, higher });
+}
+
+fn reversed_field_order_inside_the_equality_branch(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        // ruleid: agentx-stack-relationship-without-self-guard
+        relationships.insert(StackRelationship {
+            lower: peer,
+            higher: link.index,
+        });
+        return Err(invalid("self"));
+    }
+    Ok(())
+}
+
+fn guarded_with_reversed_field_order(
+    peer: u32,
+    link: &Link,
+    relationships: &mut BTreeSet<StackRelationship>,
+) -> Result<()> {
+    if link.index == peer {
+        return Err(invalid("self"));
+    }
+    // ok: agentx-stack-relationship-without-self-guard
+    relationships.insert(StackRelationship {
+        lower: peer,
+        higher: link.index,
+    });
+    Ok(())
+}
