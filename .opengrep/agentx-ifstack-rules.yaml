@@ -57,16 +57,23 @@ rules:
           # A relationship built inside the equality branch is never a rejection,
           # even when a terminating statement follows it.
           - patterns:
-              - pattern: |
-                  StackRelationship { higher: $HIGHER, lower: $LOWER }
+              # Rust accepts the fields in either order, so the rule matches both.
+              - pattern-either:
+                  - pattern: |
+                      StackRelationship { higher: $HIGHER, lower: $LOWER }
+                  - pattern: |
+                      StackRelationship { lower: $LOWER, higher: $HIGHER }
               - pattern-either:
                   - pattern-inside: |
                       if $HIGHER == $LOWER { ... }
                   - pattern-inside: |
                       if $LOWER == $HIGHER { ... }
           - patterns:
-              - pattern: |
-                  StackRelationship { higher: $HIGHER, lower: $LOWER }
+              - pattern-either:
+                  - pattern: |
+                      StackRelationship { higher: $HIGHER, lower: $LOWER }
+                  - pattern: |
+                      StackRelationship { lower: $LOWER, higher: $HIGHER }
               # The guard may sit in an enclosing block, so the trailing ellipsis spans
               # nested blocks. Anchor the terminator as the equality branch's last
               # statement. The leading ellipsis then covers any direct observations but

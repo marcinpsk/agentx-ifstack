@@ -224,6 +224,17 @@ def documented_shell_commands(path):
         yield from shell_commands(span)
 
 
+def seconds(span):
+    """Read a systemd time span. Bare numbers are seconds."""
+    units = {"us": 0.000001, "ms": 0.001, "s": 1, "min": 60, "h": 3600, "d": 86400}
+    total = 0.0
+    for value, unit in re.findall(r"(\d+(?:\.\d+)?)\s*([a-z]*)", span):
+        if not value:
+            continue
+        total += float(value) * units[unit or "s"]
+    return total
+
+
 def runs_real_namespace_suite(step):
     """Return whether a workflow step runs the suite with a compatible iproute2."""
     return list(shell_commands(str(step.get("run", "")))) == REAL_NAMESPACE_COMMANDS
@@ -578,8 +589,44 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertEqual(unit["Service"]["Restart"], "on-failure")
         self.assertEqual(unit["Service"]["RestartPreventExitStatus"], "1")
         self.assertEqual(unit["Service"]["RestartSec"], "5s")
-        self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "60s")
+        self.assertEqual(unit["Unit"]["StartLimitIntervalSec"], "10min")
         self.assertEqual(unit["Unit"].getint("StartLimitBurst"), 3)
+
+    def test_a_start_that_never_registers_stops_retrying(self):
+        """Attempts spaced wider than the limit window reset it, so it never bounds them."""
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(ROOT / "packaging/agentx-ifstack.service")
+        attempt = seconds(unit["Service"]["TimeoutStartSec"]) + seconds(
+            unit["Service"]["RestartSec"]
+        )
+        attempts = unit["Unit"].getint("StartLimitBurst")
+        self.assertGreaterEqual(
+            seconds(unit["Unit"]["StartLimitIntervalSec"]),
+            attempts * attempt,
+            "the start limit window must cover every attempt it counts",
+        )
+
+    def test_the_unit_reports_active_only_once_the_table_is_registered(self):
+        """A subagent that never registers serves nothing, and must not look healthy."""
+        unit = configparser.ConfigParser(interpolation=None)
+        unit.read(ROOT / "packaging/agentx-ifstack.service")
+        self.assertEqual(unit["Service"]["Type"], "notify")
+        self.assertEqual(unit["Service"]["NotifyAccess"], "main")
+        self.assertEqual(unit["Service"]["TimeoutStartSec"], "60s")
+
+    def test_readiness_documentation_describes_table_registration(self):
+        """READY=1 follows registration, which precedes every served read."""
+        session = (ROOT / "src/session.rs").read_text()
+        registered = session.index("registered();")
+        self.assertLess(
+            session.index("acknowledge(&mut stream, &register.header)?"), registered
+        )
+        self.assertLess(registered, session.index("loop {"))
+        self.assertNotIn("inventory", session[:registered])
+        prose = " ".join((ROOT / "README.md").read_text().split())
+        self.assertIn("`READY=1` only once it registers the table", prose)
+        self.assertNotIn("reports success when the subagent serves rows", prose)
+        self.assertIn("Registration does not mean the table serves rows", prose)
 
     def test_third_party_actions_are_pinned_to_full_commit_shas(self):
         """A movable tag lets a compromised action change what CI and releases run."""
@@ -1773,6 +1820,20 @@ class GuardRegressionTests(unittest.TestCase):
         ])
         self.assertEqual(shell_options(commands[0][3:], {"--json", "--jq"}),
                          (["1"], [("--json", "title,body"), ("--jq", ".[] | .title")]))
+
+    def test_readiness_guard_rejects_row_availability_wording(self):
+        path = ROOT / "README.md"
+        text = path.read_text()
+        start = text.index("A missing master causes connection retries.")
+        end = text.index("To run the subagent without root")
+        path.write_text(text[:start] + (
+            "A missing master causes connection retries. The unit is `Type=notify` "
+            "and reports\n`READY=1` only once it registers the table, so "
+            "`systemctl start` reports success\nwhen the subagent serves rows, and "
+            "fails at `TimeoutStartSec` when no master\nanswers the retries.\n\n"
+        ) + text[end:])
+        with self.assertRaises(AssertionError):
+            self.policy.test_readiness_documentation_describes_table_registration()
 
 
 if __name__ == "__main__":
