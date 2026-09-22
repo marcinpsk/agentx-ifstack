@@ -614,6 +614,20 @@ class PackagingPolicyTests(unittest.TestCase):
         self.assertEqual(unit["Service"]["NotifyAccess"], "main")
         self.assertEqual(unit["Service"]["TimeoutStartSec"], "60s")
 
+    def test_readiness_documentation_describes_table_registration(self):
+        """READY=1 follows registration, which precedes every served read."""
+        session = (ROOT / "src/session.rs").read_text()
+        registered = session.index("registered();")
+        self.assertLess(
+            session.index("acknowledge(&mut stream, &register.header)?"), registered
+        )
+        self.assertLess(registered, session.index("loop {"))
+        self.assertNotIn("inventory", session[:registered])
+        prose = " ".join((ROOT / "README.md").read_text().split())
+        self.assertIn("`READY=1` only once it registers the table", prose)
+        self.assertNotIn("reports success when the subagent serves rows", prose)
+        self.assertIn("Registration does not mean the table serves rows", prose)
+
     def test_third_party_actions_are_pinned_to_full_commit_shas(self):
         """A movable tag lets a compromised action change what CI and releases run."""
         unpinned = []
@@ -1806,6 +1820,20 @@ class GuardRegressionTests(unittest.TestCase):
         ])
         self.assertEqual(shell_options(commands[0][3:], {"--json", "--jq"}),
                          (["1"], [("--json", "title,body"), ("--jq", ".[] | .title")]))
+
+    def test_readiness_guard_rejects_row_availability_wording(self):
+        path = ROOT / "README.md"
+        text = path.read_text()
+        start = text.index("A missing master causes connection retries.")
+        end = text.index("To run the subagent without root")
+        path.write_text(text[:start] + (
+            "A missing master causes connection retries. The unit is `Type=notify` "
+            "and reports\n`READY=1` only once it registers the table, so "
+            "`systemctl start` reports success\nwhen the subagent serves rows, and "
+            "fails at `TimeoutStartSec` when no master\nanswers the retries.\n\n"
+        ) + text[end:])
+        with self.assertRaises(AssertionError):
+            self.policy.test_readiness_documentation_describes_table_registration()
 
 
 if __name__ == "__main__":
