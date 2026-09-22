@@ -14,11 +14,13 @@ use agentx::pdu::{self, Header, ResError, Response, Type};
 use serde::Deserialize;
 use tempfile::TempDir;
 
-mod support;
+#[path = "support/master.rs"]
+mod master;
+#[path = "support/requests.rs"]
+mod requests;
 
-use support::agentx::{
-    AgentxMaster, NETWORK_ORDER, STATUS, exchange, header, oid, range, read_frame,
-};
+use master::{AgentxMaster, NETWORK_ORDER, read_frame};
+use requests::{STATUS, exchange, header, oid, range};
 
 const TEST_UID: u32 = 65_534;
 const TEST_GID: u32 = 65_534;

@@ -48,7 +48,11 @@ The packaged unit runs as root by default because `/var/agentx` is normally
 root-owned with mode 0700. It has no capabilities and writes no files. Its
 systemd sandbox permits Unix and netlink sockets in the host network namespace.
 The unit orders itself after `snmpd.service` without pulling that service in.
-A missing master causes connection retries, not startup failure.
+A missing master causes connection retries. The unit is `Type=notify` and reports
+`READY=1` only once it registers the table, so `systemctl start` reports success
+when the subagent serves rows, and fails at `TimeoutStartSec` when no master
+answers the retries. systemd then restarts the unit, and the start limit stops it
+after three attempts rather than retrying for ever.
 
 To run the subagent without root, create a system group and user:
 

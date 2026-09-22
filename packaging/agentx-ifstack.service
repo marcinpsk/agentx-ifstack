@@ -1,11 +1,18 @@
 [Unit]
 Description=AgentX ifStackTable subagent
 After=snmpd.service
-StartLimitIntervalSec=60s
+# Wide enough to hold the three start attempts it counts. A window shorter
+# than an attempt resets between them, and the limit never stops the retries.
+StartLimitIntervalSec=10min
 StartLimitBurst=3
 
 [Service]
-Type=simple
+# The subagent reports READY=1 once it registers the table, so a start that
+# never registers fails instead of reporting a healthy service that serves
+# nothing. The timeout allows for the reconnect backoff.
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=60s
 User=root
 ExecStart=/usr/bin/agentx-ifstack
 Restart=on-failure

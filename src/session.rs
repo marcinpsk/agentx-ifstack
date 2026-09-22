@@ -16,7 +16,7 @@ const NOT_WRITABLE: u16 = 17;
 const COMMIT_FAILED: u16 = 14;
 const UNDO_FAILED: u16 = 15;
 
-pub fn run(config: &Config, tables: &TableReader) -> Result<()> {
+pub fn run(config: &Config, tables: &TableReader, registered: &dyn Fn()) -> Result<()> {
     log::info!("Connecting to AgentX master at {}", config.socket.display());
     let mut stream = UnixStream::connect(&config.socket)?;
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
@@ -40,6 +40,7 @@ pub fn run(config: &Config, tables: &TableReader) -> Result<()> {
         "AgentX session {} registered ifStackTable",
         opened.session_id
     );
+    registered();
 
     loop {
         let (header, bytes) = receive(&mut stream, IO_TIMEOUT)?;
