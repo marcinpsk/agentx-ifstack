@@ -2,6 +2,36 @@
 
 <!-- version list -->
 
+## v0.2.4 (2026-10-17)
+
+### Bug Fixes
+
+- Systemd readiness reporting ([#37](https://github.com/marcinpsk/agentx-ifstack/pull/37),
+  [`f8483fc`](https://github.com/marcinpsk/agentx-ifstack/commit/f8483fca06ba75d70086480d87c95038eea12dae))
+
+### Chores
+
+- **deps**: Bump astral-sh/setup-uv from 10.1.0 to 10.2.0
+  ([#28](https://github.com/marcinpsk/agentx-ifstack/pull/28),
+  [`291eb36`](https://github.com/marcinpsk/agentx-ifstack/commit/291eb365e602db8f0f71e8240b23a25d3cd7faa0))
+
+- **deps**: Bump rust-toolchain from 1.98.1 to 1.99.0
+  ([#27](https://github.com/marcinpsk/agentx-ifstack/pull/27),
+  [`9a4ddda`](https://github.com/marcinpsk/agentx-ifstack/commit/9a4ddda8bff4598635caf2e453ea525064551b7d))
+
+- **deps**: Bump urllib3 from 2.7.0 to 2.8.0 in the uv group across 1 directory
+  ([#29](https://github.com/marcinpsk/agentx-ifstack/pull/29),
+  [`220f57c`](https://github.com/marcinpsk/agentx-ifstack/commit/220f57cca59f21363212e0c8f014da681d1a857b))
+
+
+## v0.2.3 (2026-09-22)
+
+### Bug Fixes
+
+- Topology ([#25](https://github.com/marcinpsk/agentx-ifstack/pull/25),
+  [`17c9efa`](https://github.com/marcinpsk/agentx-ifstack/commit/17c9efab884f8a5e99e06134f2207e7ad31673e7))
+
+
 ## v0.2.2 (2026-09-17)
 
 ### Bug Fixes
