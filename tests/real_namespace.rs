@@ -88,8 +88,14 @@ impl Master {
         );
 
         let executable = directory.path().join("agentx-ifstack");
-        fs::copy(env!("CARGO_BIN_EXE_agentx-ifstack"), &executable)
+        // A separate writer cannot leak its writable descriptor into parallel forks.
+        let copied = Command::new("cp")
+            .arg("--")
+            .arg(env!("CARGO_BIN_EXE_agentx-ifstack"))
+            .arg(&executable)
+            .status()
             .expect("copy the production binary into the test directory");
+        assert!(copied.success(), "copy the production binary: {copied}");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("make the test copy executable by the subagent user");
         let mut command = Command::new(executable);
@@ -145,6 +151,40 @@ fn write_subagent_config(path: &Path, config: String) {
     fs::write(path, config).expect("write AgentX test config");
     fs::set_permissions(path, fs::Permissions::from_mode(0o444))
         .expect("make AgentX test config readable by the subagent user");
+}
+
+#[test]
+fn subagent_start_survives_parallel_forks() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let running = AtomicBool::new(true);
+    std::thread::scope(|scope| {
+        let forks = scope.spawn(|| {
+            while running.load(Ordering::Acquire) {
+                let mut command = Command::new("/bin/true");
+                // SAFETY: poll is async-signal-safe and uses no inherited memory.
+                unsafe {
+                    command.pre_exec(|| {
+                        // Keep inherited descriptors open until the child executes.
+                        libc::poll(std::ptr::null_mut(), 0, 10);
+                        Ok(())
+                    });
+                }
+                assert!(command.status().expect("run concurrent child").success());
+            }
+        });
+        let result = std::panic::catch_unwind(|| {
+            for _ in 0..64 {
+                let master = Master::start_as_test_process("");
+                let _stream = master.connect(NETWORK_ORDER, 100);
+            }
+        });
+        running.store(false, Ordering::Release);
+        forks.join().expect("join concurrent forks");
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    });
 }
 
 #[test]
