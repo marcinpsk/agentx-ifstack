@@ -1,3 +1,9 @@
+agentx-ifstack (0.2.5-1) unstable; urgency=medium
+
+  * Release 0.2.5. See CHANGELOG.md for the change list.
+
+ -- Marcin Zieba <marcinpsk@gmail.com>  Fri, 23 Oct 2026 13:57:32 +0000
+
 agentx-ifstack (0.2.4-1) unstable; urgency=medium
 
   * Release 0.2.4. See CHANGELOG.md for the change list.
