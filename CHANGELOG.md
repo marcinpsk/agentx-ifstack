@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.2.6 (2026-10-30)
+
+### Bug Fixes
+
+- **deps**: Bump actions/setup-python from 7.0.0 to 7.1.0
+  ([#46](https://github.com/marcinpsk/agentx-ifstack/pull/46),
+  [`5f37cae`](https://github.com/marcinpsk/agentx-ifstack/commit/5f37cae422dfc2b70b76ead6ed1628619bd4841a))
+
+- **deps**: Bump astral-sh/setup-uv from 10.3.0 to 10.3.2
+  ([#44](https://github.com/marcinpsk/agentx-ifstack/pull/44),
+  [`39d6a4a`](https://github.com/marcinpsk/agentx-ifstack/commit/39d6a4a4e73f56976903c6081cf9135202b65a44))
+
+- **deps**: Bump libc from 0.2.190 to 0.2.191
+  ([#43](https://github.com/marcinpsk/agentx-ifstack/pull/43),
+  [`b7e86b7`](https://github.com/marcinpsk/agentx-ifstack/commit/b7e86b7c1081d9eb87b8aefcfce74cc00d1ff93d))
+
+- **deps**: Bump zizmorcore/zizmor-action from 0.7.1 to 0.8.0
+  ([#45](https://github.com/marcinpsk/agentx-ifstack/pull/45),
+  [`d6e325b`](https://github.com/marcinpsk/agentx-ifstack/commit/d6e325bbdf4c1d21ae75301be4a5105bf3c6f560))
+
+
 ## v0.2.5 (2026-10-23)
 
 ### Bug Fixes
