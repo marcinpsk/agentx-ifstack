@@ -2,6 +2,103 @@
 
 <!-- version list -->
 
+## v0.2.9 (2026-11-06)
+
+### Bug Fixes
+
+- **deps-dev**: Bump python-semantic-release from 10.5.1 to 10.7.0
+  ([#51](https://github.com/marcinpsk/agentx-ifstack/pull/51),
+  [`32dd114`](https://github.com/marcinpsk/agentx-ifstack/commit/32dd1148b6cd55e54653fe5d78bd208a644d7f0f))
+
+
+## v0.2.8 (2026-11-06)
+
+### Bug Fixes
+
+- Improve packaging checks and CI coverage
+  ([#49](https://github.com/marcinpsk/agentx-ifstack/pull/49),
+  [`1b1bd49`](https://github.com/marcinpsk/agentx-ifstack/commit/1b1bd4973de01b437af3f262d4385efcb545b20f))
+
+
+## v0.2.7 (2026-11-06)
+
+### Bug Fixes
+
+- **deps**: Bump astral-sh/setup-uv from 10.3.2 to 10.3.3
+  ([#47](https://github.com/marcinpsk/agentx-ifstack/pull/47),
+  [`8898978`](https://github.com/marcinpsk/agentx-ifstack/commit/8898978676188589b38049032e93ccb473ed85b1))
+
+
+## v0.2.6 (2026-10-30)
+
+### Bug Fixes
+
+- **deps**: Bump actions/setup-python from 7.0.0 to 7.1.0
+  ([#46](https://github.com/marcinpsk/agentx-ifstack/pull/46),
+  [`5f37cae`](https://github.com/marcinpsk/agentx-ifstack/commit/5f37cae422dfc2b70b76ead6ed1628619bd4841a))
+
+- **deps**: Bump astral-sh/setup-uv from 10.3.0 to 10.3.2
+  ([#44](https://github.com/marcinpsk/agentx-ifstack/pull/44),
+  [`39d6a4a`](https://github.com/marcinpsk/agentx-ifstack/commit/39d6a4a4e73f56976903c6081cf9135202b65a44))
+
+- **deps**: Bump libc from 0.2.190 to 0.2.191
+  ([#43](https://github.com/marcinpsk/agentx-ifstack/pull/43),
+  [`b7e86b7`](https://github.com/marcinpsk/agentx-ifstack/commit/b7e86b7c1081d9eb87b8aefcfce74cc00d1ff93d))
+
+- **deps**: Bump zizmorcore/zizmor-action from 0.7.1 to 0.8.0
+  ([#45](https://github.com/marcinpsk/agentx-ifstack/pull/45),
+  [`d6e325b`](https://github.com/marcinpsk/agentx-ifstack/commit/d6e325bbdf4c1d21ae75301be4a5105bf3c6f560))
+
+
+## v0.2.5 (2026-10-23)
+
+### Bug Fixes
+
+- **deps**: Bump the uv group across 1 directory with 2 updates
+  ([#42](https://github.com/marcinpsk/agentx-ifstack/pull/42),
+  [`828aebf`](https://github.com/marcinpsk/agentx-ifstack/commit/828aebf064eb46082f566094d4e5e16aba4a5f4b))
+
+### Chores
+
+- **deps**: Bump actions/download-artifact from 8.0.1 to 8.0.2
+  ([#34](https://github.com/marcinpsk/agentx-ifstack/pull/34),
+  [`126e812`](https://github.com/marcinpsk/agentx-ifstack/commit/126e812a5aa9e1f568b91451f4eb0882468b36b2))
+
+- **deps**: Bump actions/upload-artifact from 7.0.1 to 7.0.2
+  ([#31](https://github.com/marcinpsk/agentx-ifstack/pull/31),
+  [`3f10077`](https://github.com/marcinpsk/agentx-ifstack/commit/3f10077b63da0edc7792721c958efe27fc7ee521))
+
+- **deps**: Bump astral-sh/setup-uv from 10.2.0 to 10.3.0
+  ([#30](https://github.com/marcinpsk/agentx-ifstack/pull/30),
+  [`044a886`](https://github.com/marcinpsk/agentx-ifstack/commit/044a886126f1a713419c78560fc79e60eae132a3))
+
+- **deps**: Bump libc from 0.2.189 to 0.2.190
+  ([#35](https://github.com/marcinpsk/agentx-ifstack/pull/35),
+  [`c7fa439`](https://github.com/marcinpsk/agentx-ifstack/commit/c7fa4397a65f6fae0415852d0a497460e5fd467c))
+
+- **deps**: Bump rust-toolchain from 1.99.0 to 1.99.1
+  ([#32](https://github.com/marcinpsk/agentx-ifstack/pull/32),
+  [`6432e55`](https://github.com/marcinpsk/agentx-ifstack/commit/6432e5581ff19c76188567f42b1ab7917aa37cc5))
+
+- **deps**: Bump serde_json from 1.0.151 to 1.0.154
+  ([#41](https://github.com/marcinpsk/agentx-ifstack/pull/41),
+  [`4830e21`](https://github.com/marcinpsk/agentx-ifstack/commit/4830e218f384d40db9f3236ac57c640d85226a54))
+
+- **deps**: Bump toml from 1.1.6+spec-1.1.0 to 1.1.8+spec-1.1.0
+  ([#33](https://github.com/marcinpsk/agentx-ifstack/pull/33),
+  [`d4f4861`](https://github.com/marcinpsk/agentx-ifstack/commit/d4f486102fe02161629e4d2c5ac7e97d75d66899))
+
+- **deps**: Bump zizmorcore/zizmor-action from 0.6.4 to 0.7.1
+  ([#40](https://github.com/marcinpsk/agentx-ifstack/pull/40),
+  [`3b5c7b8`](https://github.com/marcinpsk/agentx-ifstack/commit/3b5c7b81ea6201c817b83b05a146065b52148ad2))
+
+### Testing
+
+- Prevent executable-copy races in namespace tests
+  ([#39](https://github.com/marcinpsk/agentx-ifstack/pull/39),
+  [`d782833`](https://github.com/marcinpsk/agentx-ifstack/commit/d78283340968e5aacb51bcb771c68388add3df38))
+
+
 ## v0.2.4 (2026-10-17)
 
 ### Bug Fixes

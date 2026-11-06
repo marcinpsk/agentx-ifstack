@@ -2,7 +2,7 @@
 # table is deliberately absent so nothing here is installable or importable.
 
 [dependency-groups]
-dev = ["python-semantic-release==10.5.1"]
+dev = ["python-semantic-release==10.7.0"]
 
 [tool.semantic_release]
 version_toml = ["Cargo.toml:package.version"]
