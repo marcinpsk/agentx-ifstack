@@ -33,7 +33,7 @@ jobs:
           systemd-analyze verify packaging/agentx-ifstack.service 2>unit-warnings
           cat unit-warnings
           # verify also loads units of the runner image; fail only on warnings about this unit
-          if grep -qE '(^|/)agentx-ifstack\.service' unit-warnings; then exit 1; fi
+          if grep -qE '(^|[[:space:]/])agentx-ifstack\.service' unit-warnings; then exit 1; fi
           systemd-analyze security --offline=yes packaging/agentx-ifstack.service
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

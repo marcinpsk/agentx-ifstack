@@ -13,12 +13,12 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-import tomllib
 import yaml
 from pre_commit.clientlib import load_config
 from pre_commit.commands.run import Classifier
@@ -1184,6 +1184,42 @@ class PackagingPolicyTests(unittest.TestCase):
             "fn topology_changes_eventually_reach_get_and_walk()", 1
         )[1].split("\n#[test]", 1)[0]
         self.assertNotIn("std::thread::sleep", test)
+
+    def unit_warning_filter_fails(self, warnings):
+        """Run the packages.yml unit-warning filter under bash -e over the given stderr."""
+        steps = workflow("packages.yml")["jobs"]["build"]["steps"]
+        script = next(s["run"] for s in steps if s.get("name") == "Verify and score the unit")
+        (check,) = [line.strip() for line in script.splitlines() if line.lstrip().startswith("if grep")]
+        with tempfile.TemporaryDirectory() as work:
+            (Path(work) / "unit-warnings").write_text("".join(f"{line}\n" for line in warnings))
+            result = subprocess.run(
+                ["bash", "-e", "-c", check],
+                cwd=work, capture_output=True, text=True, timeout=30, check=False,
+            )
+        return result.returncode != 0
+
+    def test_the_unit_check_fails_only_on_warnings_about_this_unit(self):
+        """systemd-analyze verify also warns about runner-image units and can prefix each line."""
+        path = "/work/packaging/agentx-ifstack.service:10: Unknown key 'BogusOption' in section [Service], ignoring."
+        name = "agentx-ifstack.service: Command /nonexistent/agentx-ifstack is not executable: No such file or directory"
+        for warning in (
+            path,
+            name,
+            f"Fri 2026-11-06 14:26:06 CET {path}",
+            f"Fri 2026-11-06 14:26:06 CET {name}",
+            f"src/core/load-fragment.c:2311: {name}",
+        ):
+            with self.subTest(warning=warning):
+                self.assertTrue(self.unit_warning_filter_fails([warning]))
+        for warning in (
+            "/usr/lib/systemd/system/xfs_scrub_all.service:26: Support for option CPUAccounting= has been removed and it is ignored",
+            "/usr/lib/systemd/system/walinuxagent.service:21: Support for option CPUAccounting= has been removed and it is ignored",
+            "/usr/lib/systemd/system/backup-agentx-ifstack.service:3: Unknown key 'X' in section [Unit], ignoring.",
+            "Fri 2026-11-06 14:26:06 CET backup-agentx-ifstack.service: Command /bin/x is not executable",
+        ):
+            with self.subTest(warning=warning):
+                self.assertFalse(self.unit_warning_filter_fails([warning]))
+        self.assertFalse(self.unit_warning_filter_fails([]))
 
     def test_no_workflow_runs_twice_for_one_push(self):
         """push on every branch plus pull_request runs every job twice on a PR branch.
