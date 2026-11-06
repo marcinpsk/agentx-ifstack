@@ -57,7 +57,9 @@ jobs:
           name: packages
           path: dist
       - name: Install, inspect, reinstall, remove, and purge
-        run: docker run --rm -v "$PWD:/work:ro" debian:${{ matrix.version }} sh -c 'sh /work/packaging/test-deb.sh /work/dist/*.deb'
+        env:
+          DEBIAN_VERSION: ${{ matrix.version }}
+        run: docker run --rm -v "$PWD:/work:ro" "debian:$DEBIAN_VERSION" sh -c 'sh /work/packaging/test-deb.sh /work/dist/*.deb'
 
   fedora:
     needs: build

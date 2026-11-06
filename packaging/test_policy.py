@@ -1273,6 +1273,17 @@ class PackagingPolicyTests(unittest.TestCase):
                         persisting.append(f"{path.name}:{job_name}")
         self.assertEqual(persisting, [], "checkout must not persist credentials")
 
+    def test_no_run_script_expands_an_expression(self):
+        """The runner pastes ${{ }} into the script text; CodeQL flags it as code injection."""
+        expanding = []
+        for path in sorted(workflow_paths()):
+            document = yaml.load(path.read_text(), Loader=yaml.BaseLoader)
+            for job_name, job in (document.get("jobs") or {}).items():
+                for step in (job or {}).get("steps") or []:
+                    if isinstance(step, dict) and "${{" in step.get("run", ""):
+                        expanding.append(f"{path.name}:{job_name}:{step.get('name', '')}")
+        self.assertEqual(expanding, [], "pass expressions to run scripts through env")
+
     def test_the_custom_ruleset_adds_to_coderabbit_instead_of_replacing_it(self):
         """CodeRabbit runs a detected opengrep config INSTEAD OF its default packs.
 
