@@ -18,3 +18,21 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+  - package-ecosystem: docker
+    directory: /.github
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
