@@ -14,7 +14,8 @@ url=$(rpm -qp --qf '%{URL}' "$package")
 test -n "$url"
 test "$url" != '(none)'
 rpmlint -c /work/packaging/rpmlint.toml "$package"
-rpm -i "$package"
+# The package is unsigned, and RPM 6 checks signatures by default
+rpm -i --nosignature "$package"
 agentx-ifstack --version
 unit=/usr/lib/systemd/system/agentx-ifstack.service
 test -f "$unit"
@@ -35,7 +36,7 @@ sh /work/packaging/non-root-agentx.sh
 cp /etc/agentx-ifstack.toml "$work/original-config"
 printf '\n# Local configuration edit.\n' >> /etc/agentx-ifstack.toml
 cp /etc/agentx-ifstack.toml "$work/expected-config"
-rpm -U --replacepkgs "$package"
+rpm -U --nosignature --replacepkgs "$package"
 cmp "$work/expected-config" /etc/agentx-ifstack.toml
 cp "$work/original-config" /etc/agentx-ifstack.toml
 systemctl enable agentx-ifstack.service
