@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.9 (2026-11-06)
+
+### Bug Fixes
+
+- **deps-dev**: Bump python-semantic-release from 10.5.1 to 10.7.0
+  ([#51](https://github.com/marcinpsk/agentx-ifstack/pull/51),
+  [`32dd114`](https://github.com/marcinpsk/agentx-ifstack/commit/32dd1148b6cd55e54653fe5d78bd208a644d7f0f))
+
+
 ## v0.2.8 (2026-11-06)
 
 ### Bug Fixes
