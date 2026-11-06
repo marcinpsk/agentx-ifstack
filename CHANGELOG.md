@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.7 (2026-11-06)
+
+### Bug Fixes
+
+- **deps**: Bump astral-sh/setup-uv from 10.3.2 to 10.3.3
+  ([#47](https://github.com/marcinpsk/agentx-ifstack/pull/47),
+  [`8898978`](https://github.com/marcinpsk/agentx-ifstack/commit/8898978676188589b38049032e93ccb473ed85b1))
+
+
 ## v0.2.6 (2026-10-30)
 
 ### Bug Fixes
