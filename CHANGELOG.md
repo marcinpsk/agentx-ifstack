@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.2.8 (2026-11-06)
+
+### Bug Fixes
+
+- Improve packaging checks and CI coverage
+  ([#49](https://github.com/marcinpsk/agentx-ifstack/pull/49),
+  [`1b1bd49`](https://github.com/marcinpsk/agentx-ifstack/commit/1b1bd4973de01b437af3f262d4385efcb545b20f))
+
+
 ## v0.2.7 (2026-11-06)
 
 ### Bug Fixes
