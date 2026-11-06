@@ -1,10 +1,10 @@
 name: CodeQL
 
-# Push builds the baseline for each branch that pull requests target; the categories match
-# the earlier default setup, so existing alerts keep their history.
+# Push stays on main (test_no_workflow_runs_twice_for_one_push). The categories match the
+# earlier default setup, so existing alerts keep their history.
 "on":
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main, develop]
   schedule:
