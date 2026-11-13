@@ -23,7 +23,7 @@ all = { level = "deny", priority = -1 }
 [dependencies]
 agentx = "0.1.1"
 netlink-packet-core = "0.9"
-netlink-packet-route = "0.33"
+netlink-packet-route = "0.34"
 netlink-sys = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
