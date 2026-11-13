@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.2.10 (2026-11-13)
+
+### Bug Fixes
+
+- **deps**: Bump log from 0.4.34 to 0.4.35
+  ([#59](https://github.com/marcinpsk/agentx-ifstack/pull/59),
+  [`ac23dc7`](https://github.com/marcinpsk/agentx-ifstack/commit/ac23dc7f01d71671d5f228c8e48bceb5764c836c))
+
+- **deps**: Bump netlink-packet-route from 0.33.0 to 0.34.0
+  ([#58](https://github.com/marcinpsk/agentx-ifstack/pull/58),
+  [`6566836`](https://github.com/marcinpsk/agentx-ifstack/commit/6566836935516828d6f237684add709c2f2b3d0f))
+
+### Continuous Integration
+
+- Pass the Debian matrix version to the package test through env
+  ([#53](https://github.com/marcinpsk/agentx-ifstack/pull/53),
+  [`bfe78f2`](https://github.com/marcinpsk/agentx-ifstack/commit/bfe78f216a7d6788bf6d8fd275e0ae95e8a9cae7))
+
+
 ## v0.2.9 (2026-11-06)
 
 ### Bug Fixes
