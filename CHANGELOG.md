@@ -2,6 +2,23 @@
 
 <!-- version list -->
 
+## v0.2.11 (2026-11-18)
+
+### Bug Fixes
+
+- **deps**: Bump rust-toolchain from 1.99.1 to 1.100.0
+  ([#60](https://github.com/marcinpsk/agentx-ifstack/pull/60),
+  [`caaed5f`](https://github.com/marcinpsk/agentx-ifstack/commit/caaed5f6c390b2f66095825a88dc0fcc35a746ca))
+
+- **deps**: Bump toml from 1.1.8+spec-1.1.0 to 1.2.1+spec-1.1.0
+  ([#57](https://github.com/marcinpsk/agentx-ifstack/pull/57),
+  [`8f6b608`](https://github.com/marcinpsk/agentx-ifstack/commit/8f6b6086faa0e284be1fbc79b1b49c093d34375a))
+
+- **deps**: Bump zizmorcore/zizmor-action from 0.8.0 to 0.8.1
+  ([#55](https://github.com/marcinpsk/agentx-ifstack/pull/55),
+  [`fd9cb57`](https://github.com/marcinpsk/agentx-ifstack/commit/fd9cb57406f5670806034a9cc370b9d90089159e))
+
+
 ## v0.2.10 (2026-11-13)
 
 ### Bug Fixes
