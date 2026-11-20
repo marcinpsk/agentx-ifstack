@@ -643,6 +643,26 @@ class PackagingPolicyTests(unittest.TestCase):
                     unpinned.append(f"{path.name} {reference}")
         self.assertEqual(unpinned, [], "third-party actions must be pinned to a SHA")
 
+    def test_dependabot_groups_codeql_action_updates(self):
+        config = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text())
+        actions = next(
+            update
+            for update in config["updates"]
+            if update["package-ecosystem"] == "github-actions"
+        )
+        self.assertEqual(
+            actions.get("groups", {}).get("codeql"),
+            {"patterns": ["github/codeql-action/*"]},
+        )
+
+    def test_codeql_actions_use_the_same_commit(self):
+        refs = {
+            reference.split("@", 1)[1]
+            for reference in uses_references(workflow("codeql.yml"))
+            if reference.startswith("github/codeql-action/")
+        }
+        self.assertEqual(len(refs), 1, f"CodeQL steps use different refs: {sorted(refs)}")
+
     def test_ci_leaves_opengrep_to_coderabbit_and_the_local_hook(self):
         """CodeRabbit skips its own opengrep pass when it sees opengrep in the workflows.
 
