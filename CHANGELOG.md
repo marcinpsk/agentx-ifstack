@@ -2,6 +2,21 @@
 
 <!-- version list -->
 
+## v0.2.12 (2026-11-27)
+
+### Bug Fixes
+
+- **deps**: Bump EmbarkStudios/cargo-deny-action from 2.1.1 to 2.1.3
+  ([#62](https://github.com/marcinpsk/agentx-ifstack/pull/62),
+  [`579775a`](https://github.com/marcinpsk/agentx-ifstack/commit/579775a38022f6cbb369a5d8aa31bbe7e020b2e0))
+
+### Continuous Integration
+
+- Group Dependabot CodeQL action updates
+  ([#61](https://github.com/marcinpsk/agentx-ifstack/pull/61),
+  [`e215341`](https://github.com/marcinpsk/agentx-ifstack/commit/e215341eb91a18f5fdfc03ba333b9a924443df60))
+
+
 ## v0.2.11 (2026-11-18)
 
 ### Bug Fixes
